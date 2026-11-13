@@ -694,6 +694,9 @@ function _pdfExtractPageGlyphs_(doc, page) {
     if (t === null) return null; // unvollständiger Inhalt -> lieber kein Ergebnis als ein falsches
     parts.push(t);
   }
+  // Seiteninhalte nicht im Cache halten: bei langen Dokumenten läge sonst der
+  // dekomprimierte Inhalt ALLER Seiten gleichzeitig im Speicher.
+  for (var c = 0; c < refs.length; c++) delete doc.streamCache[refs[c].r];
   var glyphs = [];
   _pdfRunContent_(doc, parts.join('\n'), resources, _pdfMatIdentity_(), glyphs, 0);
   return glyphs;
@@ -961,6 +964,43 @@ function _pdfFindQuoteOnPage_(model, quote, occurrence) {
     if (boxes.length) return { boxes: boxes, exact: exact };
   }
   return null;
+}
+
+// ─── SUCHINDEX (nur Text, ohne Glyphen) ───────────────────────────────────
+// Das Seitenmodell mit allen Glyphen ist gross. Fuer die Frage "kommt das Zitat
+// auf dieser Seite ueberhaupt vor?" reicht der normalisierte Text - so muss nur
+// fuer Trefferseiten das volle Modell im Speicher liegen.
+
+/** Normalisierter Text einer Seite in beiden Suchmodi: { ws, strip }. */
+function _pdfPageSearchIndex_(model) {
+  return { ws: _pdfPageNorm_(model, false).s, strip: _pdfPageNorm_(model, true).s };
+}
+
+/** Suchmuster eines Zitats, einmal pro Fund berechnet (gleiche Regeln wie _pdfFindQuoteOnPage_). */
+function _pdfQuoteNeedles_(quote) {
+  var out = [];
+  [false, true].forEach(function(strip) {
+    var q = _pdfNormalizeChars_(String(quote || '').split(''), null, strip).s.replace(/^\s+/, '');
+    if (q.length < (strip ? 4 : 2)) return;
+    out.push({ key: strip ? 'strip' : 'ws', q: q, head: q.length >= 30 ? q.slice(0, 20) : null });
+  });
+  return out;
+}
+
+/**
+ * Schnelltest gegen den Suchindex einer Seite: 2 = Zitat steht woertlich auf
+ * der Seite, 1 = nur der Anfang (unscharfer Treffer moeglich), 0 = nichts.
+ * Bei 0 findet auch _pdfFindQuoteOnPage_ nichts.
+ */
+function _pdfQuoteMatchKind_(index, needles) {
+  var kind = 0;
+  for (var i = 0; i < needles.length; i++) {
+    var s = index[needles[i].key];
+    if (!s) continue;
+    if (s.indexOf(needles[i].q) !== -1) return 2;
+    if (needles[i].head && s.indexOf(needles[i].head) !== -1) kind = 1;
+  }
+  return kind;
 }
 
 // Fasst die Glyphen zu einem Rechteck pro Textzeile zusammen.
