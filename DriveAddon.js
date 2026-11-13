@@ -933,6 +933,8 @@ function apiExportDrivePdfAnnotated(e) {
 // PDF-Fenster (google.script.run) 6 min.
 var PDF_ANNOT_SEARCH_MS_CARD = 12000;
 var PDF_ANNOT_SEARCH_MS_WEB = 120000;
+// So viele Seitenmodelle (Glyphen mit Position) bleiben gleichzeitig im Speicher.
+var PDF_ANNOT_MODEL_CACHE_PAGES = 8;
 
 function _buildAnnotatedPdfFile_(fileId, fileName, issues, searchMs) {
   var deadline = Date.now() + (searchMs || PDF_ANNOT_SEARCH_MS_CARD);
@@ -963,11 +965,15 @@ function _buildAnnotatedPdfFile_(fileId, fileName, issues, searchMs) {
 // von Gemini genannten Seite gesucht statt in allen Seiten - jeder Fund
 // bekommt trotzdem seine Notiz (notfalls oben links auf dieser Seite).
 function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
-  // Pro Seite wird der Content-Stream nur EINMAL dekomprimiert/interpretiert
-  // und dann für alle Funde wiederverwendet (Laufzeit).
-  var pageModelCache = {};
+  // Speicher: das volle Seitenmodell (alle Glyphen mit Position) wird nur für
+  // die zuletzt benutzten Seiten gehalten. Für die Suche über alle Seiten
+  // bleibt pro Seite nur der normalisierte Text (pageIndex) - sonst läge bei
+  // langen Dokumenten das ganze Dokument als Glyphen im Speicher.
+  var modelCache = {}, modelOrder = [];
+  var pageIndex = {}; // pageIdx -> { ws, strip } oder null (Seite nicht auswertbar)
   function getPageModel(pageIdx) {
-    if (pageIdx in pageModelCache) return pageModelCache[pageIdx];
+    if (modelCache.hasOwnProperty(pageIdx)) return modelCache[pageIdx];
+    if (pageIndex[pageIdx] === null) return null;
     var model = null;
     try {
       var glyphs = _pdfExtractPageGlyphs_(doc, pages[pageIdx]);
@@ -975,8 +981,16 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
     } catch (e) {
       Logger.log('_drivePdfComputeAnnotations_: Seite ' + pageIdx + ' - Content-Stream nicht auswertbar: ' + e.message);
     }
-    pageModelCache[pageIdx] = model;
+    if (!pageIndex.hasOwnProperty(pageIdx)) pageIndex[pageIdx] = model ? _pdfPageSearchIndex_(model) : null;
+    if (!model) return null;
+    modelCache[pageIdx] = model;
+    modelOrder.push(pageIdx);
+    if (modelOrder.length > PDF_ANNOT_MODEL_CACHE_PAGES) delete modelCache[modelOrder.shift()];
     return model;
+  }
+  function getPageIndex(pageIdx) {
+    if (!pageIndex.hasOwnProperty(pageIdx)) getPageModel(pageIdx);
+    return pageIndex[pageIdx];
   }
 
   var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
@@ -991,21 +1005,32 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
 
     // Erst die von Gemini genannte Seite versuchen, danach alle anderen -
     // der tatsächliche Textinhalt ist zuverlässiger als Geminis Seitenangabe.
+    // Durchgang 1 nimmt nur Seiten, auf denen das Zitat wörtlich steht;
+    // Durchgang 2 lässt auch unscharfe Treffer (nur der Zitatanfang) zu.
     var matchedPage = null, hit = null;
     var searchOrder = [guessedPage];
     if (!deadline || Date.now() < deadline) {
       for (var p = 0; p < pages.length; p++) { if (p !== guessedPage) searchOrder.push(p); }
     }
-    for (var si = 0; si < searchOrder.length && issue.original; si++) {
-      var model = getPageModel(searchOrder[si]);
-      if (!model) continue;
-      var occKey = searchOrder[si] + '|' + String(issue.original).toLowerCase();
-      var h = _pdfFindQuoteOnPage_(model, issue.original, occurrenceUsed[occKey] || 0);
-      if (h) {
-        matchedPage = searchOrder[si];
-        hit = h;
-        occurrenceUsed[occKey] = (occurrenceUsed[occKey] || 0) + 1;
-        break;
+    var needles = issue.original ? _pdfQuoteNeedles_(issue.original) : [];
+    var kinds = [];
+    for (var pass = 2; pass >= 1 && needles.length && !hit; pass--) {
+      for (var si = 0; si < searchOrder.length; si++) {
+        if (pass === 2) {
+          var index = getPageIndex(searchOrder[si]);
+          kinds[si] = index ? _pdfQuoteMatchKind_(index, needles) : 0;
+        }
+        if (kinds[si] !== pass) continue;
+        var model = getPageModel(searchOrder[si]);
+        if (!model) continue;
+        var occKey = searchOrder[si] + '|' + String(issue.original).toLowerCase();
+        var h = _pdfFindQuoteOnPage_(model, issue.original, occurrenceUsed[occKey] || 0);
+        if (h) {
+          matchedPage = searchOrder[si];
+          hit = h;
+          occurrenceUsed[occKey] = (occurrenceUsed[occKey] || 0) + 1;
+          break;
+        }
       }
     }
 
