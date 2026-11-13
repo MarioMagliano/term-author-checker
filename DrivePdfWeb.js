@@ -93,7 +93,7 @@ function _drivePdfWebStatus_(job, status) {
     out.result = {
       resultId: status.resultId, issues: job.issues, docResult: job.docResult || null,
       info: { fileSize: job.fileSize, imagesRemoved: job.imagesRemoved, imagesKept: job.imagesKept,
-              failedRanges: job.failedRanges, annotateSteps: job.fileSize > DRIVE_PDF_ANNOTATE_MAX_BYTES,
+              failedRanges: job.failedRanges, annotateSteps: true,
               pagesTotal: out.pagesTotal, partsTotal: out.partsTotal }
     };
     return out;
@@ -205,36 +205,33 @@ function apiPdfWebExportSheet(resultId, types) {
 }
 
 /**
- * Seite: kommentierte PDF erzeugen. Kleine Dateien in einem Aufruf, grosse
- * stueckweise ({ done: false, state, pct } -> apiPdfWebAnnotateContinue).
+ * Seite: kommentierte PDF erzeugen. Reicht ein Aufruf nicht (viele Seiten,
+ * grosse Datei): { done: false, state, pct } -> apiPdfWebAnnotateContinue.
  */
 function apiPdfWebAnnotate(resultId, types) {
   var started = Date.now();
   var data = _loadDrivePdfResult_(resultId);
   data.issues = _drivePdfFilterIssues_(data.issues, types);
   try {
-    if (data.fileSize > DRIVE_PDF_ANNOTATE_MAX_BYTES) {
-      return _drivePdfWebAnnotateStatus_(_driveLargeAnnotatedStart_(data.fileId, data.fileName, data.issues, started, DRIVE_PDF_WEB_ANNOTATE_BUDGET_MS));
-    }
-    return _drivePdfWebAnnotateStatus_(_buildAnnotatedPdfFile_(data.fileId, data.fileName, data.issues, PDF_ANNOT_SEARCH_MS_WEB));
+    return _drivePdfWebAnnotateStatus_(_driveAnnotatedStart_(data.fileId, data.fileName, data.issues, started, DRIVE_PDF_WEB_ANNOTATE_BUDGET_MS));
   } catch (err) {
     Logger.log('apiPdfWebAnnotate: ' + (err.message || err));
-    throw new Error(_ct_('d.annotFailed'));
+    throw new Error(_driveAnnotateErrorText_(err));
   }
 }
 
 function apiPdfWebAnnotateContinue(stateJson) {
   var started = Date.now();
   try {
-    return _drivePdfWebAnnotateStatus_(_driveLargeAnnotatedContinue_(JSON.parse(stateJson), started, DRIVE_PDF_WEB_ANNOTATE_BUDGET_MS));
+    return _drivePdfWebAnnotateStatus_(_driveAnnotatedContinue_(JSON.parse(stateJson), started, DRIVE_PDF_WEB_ANNOTATE_BUDGET_MS));
   } catch (err) {
     Logger.log('apiPdfWebAnnotateContinue: ' + (err.message || err));
-    throw new Error(_ct_('d.annotContinueFailed', { msg: err.message || err }));
+    throw new Error(_driveAnnotateErrorText_(err));
   }
 }
 
 function _drivePdfWebAnnotateStatus_(r) {
   // Mehr Befunde als PDF_ANNOT_MAX_PER_PDF: im Fenster sagen, statt still abzuschneiden.
   if (r.done) return { done: true, url: r.url, note: r.issuesTotal > r.count ? _ct_('d.annotCapped', { n: r.count, total: r.issuesTotal }) : '' };
-  return { done: false, state: JSON.stringify(r.state), pct: Math.floor(r.state.offset / r.state.total * 100) };
+  return { done: false, state: JSON.stringify(r.state), pct: _driveAnnotatedPct_(r.state) };
 }

@@ -3,9 +3,10 @@
 // Builds a synthetic PDF and runs the annotation position search on it, then
 // reports runtime and the peak of live heap memory during the search.
 //
-//   node --expose-gc test/pdf-memory.cjs [pages=470] [issues=400] [--check]
+//   node --expose-gc test/pdf-memory.cjs [pages=470] [issues=400] [--check] [--out=annotated.pdf]
 //
 // --check: exit code 1 if results look wrong or peak heap exceeds the limit.
+// --out:   write the annotated PDF, e.g. to open it in a viewer.
 
 'use strict';
 const fs = require('fs');
@@ -131,10 +132,11 @@ function main() {
 
   // Peak heap is sampled every time a page gets interpreted (after a GC, so
   // only memory that is really still referenced counts).
-  let peak = 0;
+  let peak = 0, sampling = true;
   const origExtract = ctx._pdfExtractPageGlyphs_;
   ctx._pdfExtractPageGlyphs_ = function(doc, page) {
     const r = origExtract(doc, page);
+    if (!sampling) return r;
     if (global.gc) global.gc();
     const used = process.memoryUsage().heapUsed;
     if (used > peak) peak = used;
@@ -151,6 +153,7 @@ function main() {
   const t0 = Date.now();
   const result = ctx._drivePdfComputeAnnotations_(doc, pages, issues, null);
   const ms = Date.now() - t0;
+  sampling = false;
 
   // Every findable quote must be highlighted on the page that contains it.
   let wrong = 0;
@@ -164,16 +167,42 @@ function main() {
   });
   const findable = issues.filter(function(i) { return i._findable; }).length;
 
+  // Same search through the streamed path (structure read via cross-reference,
+  // no images), interrupted after every few pages and resumed from JSON state.
+  // Must give the same annotations; the appendix makes the output PDF.
+  const reader = ctx._pdfStringReader_(text);
+  const an = ctx._driveAnnotatedAnalyze_(reader);
+  let resumed = null, state = null, stages = 0;
+  const ctxDate = vm.runInContext('Date', ctx); // the script files see their own Date
+  const realNow = ctxDate.now;
+  while (!resumed || !resumed.done) {
+    let ticks = 0;
+    // Fake clock: time is "up" after 40 pages, whatever the machine speed.
+    ctxDate.now = function() { return ticks++ < 40 ? 0 : 10; };
+    try { resumed = ctx._drivePdfComputeAnnotations_(an.doc, an.pages, issues, null, { resume: state, stopAt: 5 }); }
+    finally { ctxDate.now = realNow; }
+    if (!resumed.done) state = JSON.parse(JSON.stringify(resumed.state));
+    stages++;
+  }
+  const sameAsDirect = JSON.stringify(resumed.pageAnnotations) === JSON.stringify(result.pageAnnotations);
+  const appended = ctx._driveAnnotatedAppendix_(reader, an, resumed.pageAnnotations);
+  const outArg = process.argv.filter(function(a) { return a.indexOf('--out=') === 0; })[0];
+  if (outArg) fs.writeFileSync(outArg.slice(6), Buffer.concat([built.pdf, Buffer.from(appended, 'latin1')]));
+
   console.log('pages ' + pages.length + ', findings ' + issues.length + ', pdf ' + mb(built.pdf.length) + ' MB');
   console.log('runtime        ' + ms + ' ms');
   console.log('peak live heap ' + mb(peak - before) + ' MB above start');
   console.log('positioned     ' + result.positioned + ' / ' + findable + ' findable, misplaced ' + wrong);
 
+  console.log('resumed search ' + stages + ' stages, ' + (sameAsDirect ? 'same result' : 'DIFFERENT result') +
+    ', appendix ' + Math.round(appended.length / 1024) + ' KB');
+
   if (check) {
-    const ok = wrong === 0 && result.positioned === findable && mb(peak - before) <= PEAK_LIMIT_MB;
+    const ok = sameAsDirect && wrong === 0 && result.positioned === findable && mb(peak - before) <= PEAK_LIMIT_MB;
     console.log(ok ? 'OK' : 'FAILED (peak limit ' + PEAK_LIMIT_MB + ' MB)');
     process.exit(ok ? 0 : 1);
   }
 }
 
-main();
+if (require.main === module) main();
+module.exports = { ROOT: ROOT, FILES: FILES, buildPdf: buildPdf, buildIssues: buildIssues };
