@@ -575,7 +575,10 @@ function annotate(){
         return;
       }
       setBusy(false);
-      alert((err && err.message) ? err.message : String(err));
+      var msg = (err && err.message) ? err.message : String(err);
+      // Laufzeit-/Speicherlimit von Apps Script: kommt als roher Systemtext an.
+      if (/exceeded|memory limit|maximum execution/i.test(msg)) msg = T['d.annotLimit'];
+      alert(msg);
     };
   }
   run('apiPdfWebAnnotate', [_result.resultId, selectedTypes()], onAnnot, onAnnotFail(null));

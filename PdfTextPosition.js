@@ -973,7 +973,13 @@ function _pdfFindQuoteOnPage_(model, quote, occurrence) {
 
 /** Normalisierter Text einer Seite in beiden Suchmodi: { ws, strip }. */
 function _pdfPageSearchIndex_(model) {
-  return { ws: _pdfPageNorm_(model, false).s, strip: _pdfPageNorm_(model, true).s };
+  return _pdfSearchIndexFromWs_(_pdfPageNorm_(model, false).s);
+}
+
+// Der "strip"-Text ist der "ws"-Text ohne Leerzeichen und Bindestriche - so
+// reicht es, im Zwischenstand einer fortgesetzten Suche nur "ws" zu speichern.
+function _pdfSearchIndexFromWs_(ws) {
+  return { ws: ws, strip: ws.replace(/[ -]/g, '') };
 }
 
 /** Suchmuster eines Zitats, einmal pro Fund berechnet (gleiche Regeln wie _pdfFindQuoteOnPage_). */
