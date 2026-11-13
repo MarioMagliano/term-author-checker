@@ -7,8 +7,9 @@ var DRIVE_PDF_MAX_BYTES = 15 * 1024 * 1024; // Sicherheitsgrenze, ca. 15 MB (Gem
 // Größere PDFs werden vor dem Check ohne Bilder neu aufgebaut (PdfShrink.gs);
 // bis zu dieser Dateigröße wird das versucht.
 var DRIVE_PDF_SHRINK_MAX_BYTES = 300 * 1024 * 1024;
-// Apps Script kann Dateien nur bis 50 MB als Ganzes laden - darüber wird die
-// annotierte Kopie stückweise geschrieben (siehe _driveLargeAnnotatedStart_).
+// Die annotierte Kopie wird stückweise geschrieben (siehe _driveAnnotatedStart_).
+// Nur wenn das an der PDF-Struktur scheitert, wird bis zu dieser Größe wie
+// früher die ganze Datei geladen (Apps Script kann das nur bis 50 MB).
 var DRIVE_PDF_ANNOTATE_MAX_BYTES = 45 * 1024 * 1024;
 // Bei verkleinerten PDFs: so viel Bilddaten bleiben insgesamt erhalten (kleinste
 // Bilder zuerst - Piktogramme/Warnsymbole vor großen Fotos).
@@ -891,27 +892,33 @@ function apiExportDrivePdfAnnotated(e) {
   var started = Date.now();
   try {
     var data = _loadDrivePdfResult_(e.parameters.resultId);
-    if (data.fileSize > DRIVE_PDF_ANNOTATE_MAX_BYTES) {
-      var r = _driveLargeAnnotatedStart_(data.fileId, data.fileName, data.issues, started);
-      if (!r.done) {
-        return CardService.newActionResponseBuilder()
-          .setNavigation(CardService.newNavigation().pushCard(_buildDrivePdfAnnotateProgressCard_(r.state)))
-          .build();
-      }
-      return CardService.newActionResponseBuilder().setOpenLink(CardService.newOpenLink().setUrl(r.url)).build();
+    var r = _driveAnnotatedStart_(data.fileId, data.fileName, data.issues, started);
+    if (!r.done) {
+      return CardService.newActionResponseBuilder()
+        .setNavigation(CardService.newNavigation().pushCard(_buildDrivePdfAnnotateProgressCard_(r.state)))
+        .build();
     }
-    var built = _buildAnnotatedPdfFile_(data.fileId, data.fileName, data.issues);
-    return CardService.newActionResponseBuilder()
-      .setOpenLink(CardService.newOpenLink().setUrl(built.url))
-      .build();
+    return CardService.newActionResponseBuilder().setOpenLink(CardService.newOpenLink().setUrl(r.url)).build();
   } catch (err) {
-    // Bewusst kein technischer Rohtext (z.B. "compressed object stream") in der
-    // Notification, nur eine Zeile plus Alternative - der Grund landet im Log.
     Logger.log('apiExportDrivePdfAnnotated: ' + (err.message || err));
     return CardService.newActionResponseBuilder()
-      .setNotification(CardService.newNotification().setText(_ct_('d.annotFailed')))
+      .setNotification(CardService.newNotification().setText(_driveAnnotateErrorText_(err)))
       .build();
   }
+}
+
+/**
+ * Meldung für den Nutzer, passend zur Ursache. Probleme mit der PDF-Struktur
+ * bewusst ohne technischen Rohtext (z.B. "compressed object stream"), nur eine
+ * Zeile plus Alternative - der Grund landet im Log. Laufzeit- und
+ * Speicherlimits lassen sich hier nicht abfangen (Apps Script bricht hart ab);
+ * die meldet das PDF-Fenster selbst (d.annotLimit in PdfCheck.html).
+ */
+function _driveAnnotateErrorText_(err) {
+  var msg = String((err && err.message) || err);
+  if (/encrypt/i.test(msg)) return _ct_('d.annotEncrypted');
+  if (/^Drive (download|upload)/.test(msg)) return _ct_('d.annotContinueFailed', { msg: msg });
+  return _ct_('d.annotFailed');
 }
 
 /**
@@ -929,10 +936,9 @@ function apiExportDrivePdfAnnotated(e) {
  * Wirft weiter, wenn die PDF-Struktur selbst nicht auffindbar war (siehe
  * PdfAnnotate.gs) - der Aufrufer fängt das ab.
  */
-// Zeit fuer die Positionssuche: Card-Aktionen duerfen 30 s laufen, das
-// PDF-Fenster (google.script.run) 6 min.
+// Zeit fuer die Positionssuche, wenn die Datei komplett geladen wird (nur noch
+// Rueckfall, siehe _driveAnnotatedStart_): Card-Aktionen duerfen 30 s laufen.
 var PDF_ANNOT_SEARCH_MS_CARD = 12000;
-var PDF_ANNOT_SEARCH_MS_WEB = 120000;
 // So viele Seitenmodelle (Glyphen mit Position) bleiben gleichzeitig im Speicher.
 var PDF_ANNOT_MODEL_CACHE_PAGES = 8;
 
@@ -964,16 +970,34 @@ function _buildAnnotatedPdfFile_(fileId, fileName, issues, searchMs) {
 // deadline (ms seit 1970, optional): danach wird ein Fund nur noch auf der
 // von Gemini genannten Seite gesucht statt in allen Seiten - jeder Fund
 // bekommt trotzdem seine Notiz (notfalls oben links auf dieser Seite).
-function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
+//
+// opts (optional) macht die Suche fortsetzbar:
+//   stopAt: Zeitpunkt (ms seit 1970), ab dem die Suche unterbricht. Sie liefert
+//           dann { done: false, state } - state ist reines JSON.
+//   resume: state eines früheren Aufrufs; die Suche macht dort weiter.
+// Ohne Unterbrechung enthält das Ergebnis done: true.
+function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
+  opts = opts || {};
+  var st = opts.resume || { next: 0, pageAnnotations: {}, iconsOnPage: {}, occurrenceUsed: {}, positioned: 0, pageWs: {} };
+  var STOP = {};
+  var builtThisRun = 0;
+
   // Speicher: das volle Seitenmodell (alle Glyphen mit Position) wird nur für
   // die zuletzt benutzten Seiten gehalten. Für die Suche über alle Seiten
   // bleibt pro Seite nur der normalisierte Text (pageIndex) - sonst läge bei
   // langen Dokumenten das ganze Dokument als Glyphen im Speicher.
   var modelCache = {}, modelOrder = [];
   var pageIndex = {}; // pageIdx -> { ws, strip } oder null (Seite nicht auswertbar)
+  for (var wk in st.pageWs) {
+    if (st.pageWs.hasOwnProperty(wk)) pageIndex[wk] = st.pageWs[wk] === null ? null : _pdfSearchIndexFromWs_(st.pageWs[wk]);
+  }
+  // Liefert das Modell, null (Seite nicht auswertbar) oder STOP (Zeit um).
   function getPageModel(pageIdx) {
     if (modelCache.hasOwnProperty(pageIdx)) return modelCache[pageIdx];
     if (pageIndex[pageIdx] === null) return null;
+    // Mindestens eine Seite pro Aufruf, damit es immer vorangeht.
+    if (opts.stopAt && builtThisRun > 0 && Date.now() > opts.stopAt) return STOP;
+    builtThisRun++;
     var model = null;
     try {
       var glyphs = _pdfExtractPageGlyphs_(doc, pages[pageIdx]);
@@ -981,60 +1005,70 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
     } catch (e) {
       Logger.log('_drivePdfComputeAnnotations_: Seite ' + pageIdx + ' - Content-Stream nicht auswertbar: ' + e.message);
     }
-    if (!pageIndex.hasOwnProperty(pageIdx)) pageIndex[pageIdx] = model ? _pdfPageSearchIndex_(model) : null;
+    if (!pageIndex.hasOwnProperty(pageIdx)) {
+      pageIndex[pageIdx] = model ? _pdfPageSearchIndex_(model) : null;
+      st.pageWs[pageIdx] = model ? pageIndex[pageIdx].ws : null;
+    }
     if (!model) return null;
     modelCache[pageIdx] = model;
     modelOrder.push(pageIdx);
     if (modelOrder.length > PDF_ANNOT_MODEL_CACHE_PAGES) delete modelCache[modelOrder.shift()];
     return model;
   }
+  // Liefert den Suchindex, null oder STOP.
   function getPageIndex(pageIdx) {
-    if (!pageIndex.hasOwnProperty(pageIdx)) getPageModel(pageIdx);
+    if (!pageIndex.hasOwnProperty(pageIdx) && getPageModel(pageIdx) === STOP) return STOP;
     return pageIndex[pageIdx];
   }
 
   var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
-  var pageAnnotations = {};
-  var iconsOnPage = {};     // pageIdx -> bereits belegte Icon-Rechtecke
-  var occurrenceUsed = {};  // gleiches Zitat mehrfach gemeldet -> nächstes Vorkommen nehmen
-  var positioned = 0;
+  var pageAnnotations = st.pageAnnotations;
+  var iconsOnPage = st.iconsOnPage;        // pageIdx -> bereits belegte Icon-Rechtecke
+  var occurrenceUsed = st.occurrenceUsed;  // gleiches Zitat mehrfach gemeldet -> nächstes Vorkommen nehmen
 
-  capped.forEach(function(issue) {
-    var guessedPage = _pdfGuessPageIndex_(issue.location);
-    if (guessedPage === null || guessedPage < 0 || guessedPage >= pages.length) guessedPage = 0;
-
+  // Sucht die Stelle eines Fundes: { page, hit, model } oder STOP. Ändert bis
+  // zum Treffer nichts am Zwischenstand, ein Abbruch kostet also nur diesen Fund.
+  function locate(issue, guessedPage) {
     // Erst die von Gemini genannte Seite versuchen, danach alle anderen -
     // der tatsächliche Textinhalt ist zuverlässiger als Geminis Seitenangabe.
     // Durchgang 1 nimmt nur Seiten, auf denen das Zitat wörtlich steht;
     // Durchgang 2 lässt auch unscharfe Treffer (nur der Zitatanfang) zu.
-    var matchedPage = null, hit = null;
     var searchOrder = [guessedPage];
     if (!deadline || Date.now() < deadline) {
       for (var p = 0; p < pages.length; p++) { if (p !== guessedPage) searchOrder.push(p); }
     }
     var needles = issue.original ? _pdfQuoteNeedles_(issue.original) : [];
     var kinds = [];
-    for (var pass = 2; pass >= 1 && needles.length && !hit; pass--) {
+    for (var pass = 2; pass >= 1 && needles.length; pass--) {
       for (var si = 0; si < searchOrder.length; si++) {
         if (pass === 2) {
           var index = getPageIndex(searchOrder[si]);
+          if (index === STOP) return STOP;
           kinds[si] = index ? _pdfQuoteMatchKind_(index, needles) : 0;
         }
         if (kinds[si] !== pass) continue;
         var model = getPageModel(searchOrder[si]);
+        if (model === STOP) return STOP;
         if (!model) continue;
         var occKey = searchOrder[si] + '|' + String(issue.original).toLowerCase();
         var h = _pdfFindQuoteOnPage_(model, issue.original, occurrenceUsed[occKey] || 0);
         if (h) {
-          matchedPage = searchOrder[si];
-          hit = h;
           occurrenceUsed[occKey] = (occurrenceUsed[occKey] || 0) + 1;
-          break;
+          return { page: searchOrder[si], hit: h, model: model };
         }
       }
     }
+    return { page: null, hit: null, model: null };
+  }
 
-    var pageIdx = matchedPage !== null ? matchedPage : guessedPage;
+  for (; st.next < capped.length; st.next++) {
+    var issue = capped[st.next];
+    var guessedPage = _pdfGuessPageIndex_(issue.location);
+    if (guessedPage === null || guessedPage < 0 || guessedPage >= pages.length) guessedPage = 0;
+
+    var found = locate(issue, guessedPage);
+    if (found === STOP) return { done: false, state: st, count: capped.length, total: issues.length };
+    var pageIdx = found.page !== null ? found.page : guessedPage;
 
     var type = _issueTypeKey_(issue);
     var typeLabel = (type === 'prompt' && issue.rule ? issue.rule : _ct_('type.' + type)).toUpperCase();
@@ -1043,84 +1077,156 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
       (issue.location ? '\n\n(AI-reported location: ' + issue.location + ')' : '');
     var ann = { contents: contents, title: 'Author Check (' + typeLabel + ')' };
 
-    if (hit) {
-      positioned++;
-      ann.highlight = hit.boxes;
+    if (found.hit) {
+      st.positioned++;
+      ann.highlight = found.hit.boxes;
       if (!iconsOnPage[pageIdx]) iconsOnPage[pageIdx] = [];
       ann.rect = _pdfPlaceNoteIcon_(pages[pageIdx].mediaBox || [0, 0, 612, 792],
-        getPageModel(pageIdx), hit.boxes[0], iconsOnPage[pageIdx]);
+        found.model, found.hit.boxes[0], iconsOnPage[pageIdx]);
     } // sonst: kein rect -> automatischer Stapel-Fallback oben links
 
     if (!pageAnnotations[pageIdx]) pageAnnotations[pageIdx] = [];
     pageAnnotations[pageIdx].push(ann);
-  });
+  }
 
-  return { pageAnnotations: pageAnnotations, count: capped.length, total: issues.length, positioned: positioned };
+  return { done: true, pageAnnotations: pageAnnotations, count: capped.length, total: issues.length, positioned: st.positioned };
 }
 
-// ─── ANNOTIERTE KOPIE GROSSER PDFs (über 50 MB) ───────────────────────────
-// Apps Script kann Dateien über 50 MB weder komplett laden noch als Ganzes
-// speichern. Ein Incremental Update hängt aber nur Daten ans ENDE der
-// unveränderten Original-PDF an. Deshalb:
-//  1. Positionen der Funde aus der verkleinerten Fassung berechnen (gleiche
-//     Objektnummern wie das Original, Bilder werden dafür nicht gebraucht) und
-//     daraus den Anhang bauen (pdfAnnotationUpdate_ in PdfAnnotate.gs).
-//  2. Das Original stückweise per Range-Anfrage lesen und über die "resumable
-//     upload"-Schnittstelle von Drive stückweise als neue Datei hochladen, am
-//     Ende den Anhang dazu.
-// Reicht die Zeit einer Aktion nicht, wird der Upload in der nächsten Aktion
-// fortgesetzt ("Continue"), die Upload-Sitzung bleibt bei Google eine Woche gültig.
+// ─── ANNOTIERTE KOPIE OHNE DIE DATEI IM SPEICHER ──────────────────────────
+// Ein Incremental Update hängt nur Daten ans ENDE der unveränderten
+// Original-PDF an. Die Datei muss dafür nie als Ganzes geladen werden - das
+// scheitert bei Apps Script nicht erst ab 50 MB, sondern wegen des
+// Speicherbedarfs schon bei deutlich kleineren Dateien mit vielen Bildern.
+// Deshalb für ALLE Größen:
+//  1. Suche: Struktur und Seiteninhalte per Range-Anfrage lesen (ohne Bilder,
+//     gleiche Objektnummern wie das Original), Positionen der Funde suchen.
+//     Reicht die Zeit einer Aktion nicht, wird der Zwischenstand als
+//     Temp-Datei gespeichert und in der nächsten Aktion fortgesetzt.
+//  2. Upload: das Original stückweise per Range-Anfrage lesen und über die
+//     "resumable upload"-Schnittstelle von Drive stückweise als neue Datei
+//     hochladen, am Ende den Anhang (pdfAnnotationUpdate_ in PdfAnnotate.gs)
+//     dazu. Die Upload-Sitzung bleibt bei Google eine Woche gültig.
+// Die Bilder des Originals bleiben dabei Byte für Byte erhalten.
 var DRIVE_UPLOAD_CHUNK = 16 * 1024 * 1024;     // Vielfaches von 256 KiB (Vorgabe von Drive)
 var DRIVE_ACTION_BUDGET_MS = 15000;            // danach Fortsetzung in der nächsten Aktion (Limit 30 s, ein Stück dauert mehrere s)
+var DRIVE_ANNOT_MIN_SEARCH_MS = 4000;          // so lange sucht jede Aktion mindestens, auch wenn das Einlesen schon lange gedauert hat
 
-function _driveLargeAnnotatedStart_(fileId, fileName, issues, started, budgetMs) {
+/**
+ * Startet die kommentierte Kopie. Liefert { done: true, url, count, issuesTotal }
+ * oder { done: false, state } (weiter mit _driveAnnotatedContinue_).
+ */
+function _driveAnnotatedStart_(fileId, fileName, issues, started, budgetMs) {
   var fileSize = DriveApp.getFileById(fileId).getSize();
-  var reader = _pdfDriveRangeReader_(fileId, fileSize);
-  var model = pdfRebuild_(reader, { imageBudget: 0 });
-  var doc = _pdfOpenDoc_(model.text, model.offsets);
-  var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
-  var result = _drivePdfComputeAnnotations_(doc, pages, issues,
-    started + Math.min(PDF_ANNOT_SEARCH_MS_WEB, Math.floor((budgetMs || DRIVE_ACTION_BUDGET_MS) / 2)));
-
-  var appended = pdfAnnotationUpdate_({
-    baseLength: fileSize,
-    endsWithNewline: reader.read(fileSize - 1, fileSize) === '\n',
-    prevXref: model.origStartxref,
-    trailerDict: model.origTrailer,
-    rootNum: model.rootNum,
-    pages: pages,
-    maxObjNum: model.maxNum,
-    readAnnotsArray: function(num) { return _pdfReadArrayObject_(model.text, model.offsets, num, doc); }
-  }, result.pageAnnotations);
-
-  // Der Anhang (wenige KB) wird bis zum Ende des Uploads als Temp-Datei geparkt.
-  var tmp = _tcFolder_('temp').createFile(Utilities.newBlob(
-    _pdfBinaryStringToBytes_(appended), 'application/octet-stream', '.authorcheck-temp-' + Utilities.getUuid() + '.bin'));
-
-  var total = fileSize + appended.length;
-  var outName = fileName.replace(/\.pdf$/i, '') + ' (annotated).pdf';
-  var init = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
-    method: 'post', contentType: 'application/json; charset=UTF-8',
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), 'X-Upload-Content-Type': 'application/pdf', 'X-Upload-Content-Length': String(total) },
-    payload: JSON.stringify({ name: outName, mimeType: 'application/pdf', parents: [_tcFolder_('pdfs').getId()] }),
-    muteHttpExceptions: true
-  });
-  if (init.getResponseCode() !== 200) throw new Error('Drive upload could not be started (HTTP ' + init.getResponseCode() + ').');
-  var hdrs = init.getHeaders();
-  var sessionUri = hdrs.Location || hdrs.location;
-  if (!sessionUri) throw new Error('Drive upload could not be started (no session).');
-
-  var state = { srcId: fileId, fileName: fileName, fileSize: fileSize, total: total, offset: 0,
-                session: sessionUri, tmpId: tmp.getId(), count: result.count, issuesTotal: result.total, positioned: result.positioned };
-  return _driveLargeAnnotatedContinue_(state, started, budgetMs);
+  var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
+  // Funde und Zwischenstand der Suche liegen in einer Temp-Datei (zu gross für
+  // die Parameter einer Card-Aktion).
+  var work = _tcFolder_('temp').createFile('.authorcheck-temp-' + Utilities.getUuid() + '.json',
+    JSON.stringify({ issues: capped, search: null }), 'application/json');
+  var state = { phase: 'search', srcId: fileId, fileName: fileName, fileSize: fileSize, workId: work.getId(),
+                count: capped.length, issuesTotal: issues.length, next: 0 };
+  try {
+    return _driveAnnotatedContinue_(state, started, budgetMs);
+  } catch (err) {
+    _tcDeleteFile_(state.workId);
+    // Struktur per Cross-Reference nicht lesbar (z. B. beschädigte xref-Tabelle):
+    // kleine Dateien wie früher komplett laden - der Klartext-Scan dort ist toleranter.
+    if (err.pdfStructure && fileSize <= DRIVE_PDF_ANNOTATE_MAX_BYTES) {
+      Logger.log('_driveAnnotatedStart_: Rückfall auf Komplett-Laden: ' + (err.message || err));
+      return _buildAnnotatedPdfFile_(fileId, fileName, issues, Math.max(5000, Math.floor((budgetMs || DRIVE_ACTION_BUDGET_MS) / 2)));
+    }
+    throw err;
+  }
 }
 
 /**
- * Lädt weitere Stücke hoch, bis fertig oder das Zeitbudget der Aktion erreicht
- * ist. Liefert { done: true, url } oder { done: false, state }.
+ * Liest Struktur und Seiten einer PDF über reader (ohne Bilder). Fehler dabei
+ * sind mit err.pdfStructure markiert.
  */
-function _driveLargeAnnotatedContinue_(state, started, budgetMs) {
+function _driveAnnotatedAnalyze_(reader) {
+  try {
+    var model = pdfRebuild_(reader, { imageBudget: 0 });
+    var doc = _pdfOpenDoc_(model.text, model.offsets);
+    var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
+    return { model: model, doc: doc, pages: pages };
+  } catch (err) {
+    if (!/^Drive download/.test(err.message || '')) err.pdfStructure = true;
+    throw err;
+  }
+}
+
+function _driveAnnotatedRequirePlain_(an) {
+  // Verschlüsselt: gleich abbrechen statt erst nach der ganzen Suche (pdfAnnotationUpdate_).
+  if (an.model.encrypted) throw new Error('Encrypted PDFs are not supported for annotation.');
+}
+
+/** Baut den Anhang (Incremental Update) für die Original-Datei hinter reader. */
+function _driveAnnotatedAppendix_(reader, an, pageAnnotations) {
+  return pdfAnnotationUpdate_({
+    baseLength: reader.size,
+    endsWithNewline: reader.read(reader.size - 1, reader.size) === '\n',
+    prevXref: an.model.origStartxref,
+    trailerDict: an.model.origTrailer,
+    rootNum: an.model.rootNum,
+    pages: an.pages,
+    maxObjNum: an.model.maxNum,
+    readAnnotsArray: function(num) { return _pdfReadArrayObject_(an.model.text, an.model.offsets, num, an.doc); }
+  }, pageAnnotations);
+}
+
+/** Fortschritt in Prozent: Suche = erste Hälfte, Upload = zweite Hälfte. */
+function _driveAnnotatedPct_(state) {
+  if (state.phase === 'search') return Math.floor(50 * state.next / Math.max(1, state.count));
+  return 50 + Math.floor(50 * state.offset / state.total);
+}
+
+/**
+ * Setzt Suche bzw. Upload fort, bis fertig oder das Zeitbudget der Aktion
+ * erreicht ist. Liefert { done: true, url } oder { done: false, state }.
+ */
+function _driveAnnotatedContinue_(state, started, budgetMs) {
   budgetMs = budgetMs || DRIVE_ACTION_BUDGET_MS;
+
+  if (state.phase === 'search') {
+    var reader = _pdfDriveRangeReader_(state.srcId, state.fileSize);
+    var an = _driveAnnotatedAnalyze_(reader);
+    _driveAnnotatedRequirePlain_(an);
+    var workFile = DriveApp.getFileById(state.workId);
+    var work = JSON.parse(workFile.getBlob().getDataAsString());
+    var result = _drivePdfComputeAnnotations_(an.doc, an.pages, work.issues, null, {
+      resume: work.search,
+      stopAt: Math.max(started + budgetMs, Date.now() + DRIVE_ANNOT_MIN_SEARCH_MS)
+    });
+    if (!result.done) {
+      work.search = result.state;
+      workFile.setContent(JSON.stringify(work));
+      state.next = result.state.next;
+      return { done: false, state: state };
+    }
+
+    var appended = _driveAnnotatedAppendix_(reader, an, result.pageAnnotations);
+    // Der Anhang (wenige KB) wird bis zum Ende des Uploads als Temp-Datei geparkt.
+    var tmp = _tcFolder_('temp').createFile(Utilities.newBlob(
+      _pdfBinaryStringToBytes_(appended), 'application/octet-stream', '.authorcheck-temp-' + Utilities.getUuid() + '.bin'));
+
+    var total = state.fileSize + appended.length;
+    var outName = state.fileName.replace(/\.pdf$/i, '') + ' (annotated).pdf';
+    var init = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+      method: 'post', contentType: 'application/json; charset=UTF-8',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), 'X-Upload-Content-Type': 'application/pdf', 'X-Upload-Content-Length': String(total) },
+      payload: JSON.stringify({ name: outName, mimeType: 'application/pdf', parents: [_tcFolder_('pdfs').getId()] }),
+      muteHttpExceptions: true
+    });
+    if (init.getResponseCode() !== 200) throw new Error('Drive upload could not be started (HTTP ' + init.getResponseCode() + ').');
+    var hdrs = init.getHeaders();
+    var sessionUri = hdrs.Location || hdrs.location;
+    if (!sessionUri) throw new Error('Drive upload could not be started (no session).');
+
+    _tcDeleteFile_(state.workId);
+    state = { phase: 'upload', srcId: state.srcId, fileName: state.fileName, fileSize: state.fileSize, total: total, offset: 0,
+              session: sessionUri, tmpId: tmp.getId(), count: result.count, issuesTotal: result.total, positioned: result.positioned };
+    an = null; reader = null; work = null; // Speicher vor dem Upload freigeben
+  }
+
   var token = ScriptApp.getOAuthToken();
   var srcUrl = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(state.srcId) + '?alt=media&supportsAllDrives=true';
   var appended = null;
@@ -1167,7 +1273,7 @@ function _driveLargeAnnotatedContinue_(state, started, budgetMs) {
 }
 
 function _buildDrivePdfAnnotateProgressCard_(state) {
-  var pct = Math.floor(state.offset / state.total * 100);
+  var pct = _driveAnnotatedPct_(state);
   var card = CardService.newCardBuilder();
   card.setHeader(CardService.newCardHeader().setTitle('⏳ ' + _ct_('d.creatingAnnot')).setSubtitle(state.fileName));
   var section = CardService.newCardSection();
@@ -1192,13 +1298,13 @@ function _buildDrivePdfAnnotatedDoneCard_(fileName, url) {
   return card.build();
 }
 
-/** Card-Action: setzt den Upload einer großen annotierten PDF fort. */
+/** Card-Action: setzt Suche bzw. Upload der annotierten PDF fort. */
 function apiExportDrivePdfAnnotatedContinue(e) {
   _driveRequireScopes_();
   var started = Date.now();
   try {
     var state = JSON.parse(e.parameters.state);
-    var r = _driveLargeAnnotatedContinue_(state, started);
+    var r = _driveAnnotatedContinue_(state, started);
     var nav = CardService.newNavigation().updateCard(r.done
       ? _buildDrivePdfAnnotatedDoneCard_(state.fileName, r.url)
       : _buildDrivePdfAnnotateProgressCard_(r.state));
@@ -1206,7 +1312,7 @@ function apiExportDrivePdfAnnotatedContinue(e) {
   } catch (err) {
     Logger.log('apiExportDrivePdfAnnotatedContinue: ' + (err.message || err));
     return CardService.newActionResponseBuilder()
-      .setNotification(CardService.newNotification().setText(_ct_('d.annotContinueFailed', { msg: err.message || err })))
+      .setNotification(CardService.newNotification().setText(_driveAnnotateErrorText_(err)))
       .build();
   }
 }
