@@ -1,0 +1,1268 @@
+// ============================================================================
+// DRIVE ADD-ON - PDF-Check (Grammatik/Terminologie/Stil, wie Author Check in
+// Docs/Sheets/Slides). Ergebnis-Ausgabe nur als Sheet-Export, da Drive für PDFs
+// keine sichtbaren Kommentare unterstützt (siehe _buildDrivePdfResultsCard_).
+// ============================================================================
+var DRIVE_PDF_MAX_BYTES = 15 * 1024 * 1024; // Sicherheitsgrenze, ca. 15 MB (Gemini-Anfrage max. ~20 MB)
+// Größere PDFs werden vor dem Check ohne Bilder neu aufgebaut (PdfShrink.gs);
+// bis zu dieser Dateigröße wird das versucht.
+var DRIVE_PDF_SHRINK_MAX_BYTES = 300 * 1024 * 1024;
+// Apps Script kann Dateien nur bis 50 MB als Ganzes laden - darüber wird die
+// annotierte Kopie stückweise geschrieben (siehe _driveLargeAnnotatedStart_).
+var DRIVE_PDF_ANNOTATE_MAX_BYTES = 45 * 1024 * 1024;
+// Bei verkleinerten PDFs: so viel Bilddaten bleiben insgesamt erhalten (kleinste
+// Bilder zuerst - Piktogramme/Warnsymbole vor großen Fotos).
+var DRIVE_PDF_IMAGE_BUDGET = 12 * 1024 * 1024;
+var DRIVE_PDF_RESULT_CACHE_TTL = 3600; // 1h, reicht für eine interaktive Session in Drive
+var DRIVE_PDF_MAX_CARD_ISSUES = 25; // Card-UI bleibt sonst zu groß/langsam
+var DRIVE_PDF_LAST_LANG_KEY = 'DRIVE_PDF_LAST_LANGUAGE';
+
+// Gleiche Sprachliste wie im Author-Check-Sidebar (AuthorCheck.html), damit die
+// PDF-Prüfung aus Google Drive dieselben Sprachen wie Docs/Sheets/Slides anbietet.
+var DRIVE_PDF_LANGUAGES = [
+  ['de', 'German'], ['en', 'English'], ['es', 'Spanish'], ['sv', 'Swedish'],
+  ['pt', 'Portuguese'], ['ru', 'Russian'], ['it', 'Italian'], ['fr', 'French'],
+  ['nl', 'Dutch'], ['hu', 'Hungarian'], ['sk', 'Slovak'], ['hr', 'Croatian'],
+  ['tr', 'Turkish'], ['pl', 'Polish'], ['fi', 'Finnish'], ['sr', 'Serbian'],
+  ['ar', 'Arabic'], ['bg', 'Bulgarian'], ['el', 'Greek'], ['ko', 'Korean'],
+  ['da', 'Danish'], ['ja', 'Japanese'], ['vi', 'Vietnamese'], ['zh', 'Chinese'],
+  ['lv', 'Latvian'], ['cs', 'Czech'], ['uk', 'Ukrainian'], ['ro', 'Romanian'],
+  ['et', 'Estonian'], ['sl', 'Slovenian'], ['nb', 'Norwegian']
+];
+
+// Seit der granularen OAuth-Zustimmung kann ein Nutzer bei der Installation
+// einzelne Berechtigungen abwählen (z.B. Google Drive). Dann schlägt jeder
+// DriveApp-Aufruf fehl ("Sie haben nicht die erforderliche Berechtigung,
+// DriveApp.getFileById anzurufen"), auch nach Neuinstallation. requireScopes
+// bricht in dem Fall ab und zeigt stattdessen die Autorisierungs-Card, mit der
+// genau die fehlenden Berechtigungen nachträglich erteilt werden.
+// Wichtig: nie innerhalb eines try/catch aufrufen, sonst wird der Abbruch verschluckt.
+var DRIVE_ADDON_REQUIRED_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/script.external_request'
+];
+
+function _driveRequireScopes_() {
+  ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, DRIVE_ADDON_REQUIRED_SCOPES);
+}
+
+function onDriveHomepage(e) {
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader()
+    .setTitle('Kärcher TermCheck – Author Check')
+    .setSubtitle('📄 ' + _ct_('d.subtitle')));
+  card.addSection(CardService.newCardSection()
+    .addWidget(CardService.newTextParagraph()
+      .setText(_ct_('d.homeText'))));
+  return card.build();
+}
+
+function onDriveItemsSelected(e) {
+  _driveRequireScopes_();
+  var items = (e.drive && e.drive.selectedItems) || [];
+
+  if (items.length !== 1) {
+    return _buildDriveInfoCard_('☝️ ' + _ct_('d.oneFileTitle'), _ct_('d.oneFileText'));
+  }
+
+  var item = items[0];
+  if (item.mimeType !== 'application/pdf') {
+    return _buildDriveInfoCard_('📄 ' + _ct_('d.onlyPdfTitle'), _ct_('d.onlyPdfText', { name: _escapeCardHtml_(item.title) }));
+  }
+
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader()
+    .setTitle('Kärcher TermCheck – Author Check')
+    .setSubtitle(item.title));
+
+  // Ergebnis der letzten Prüfung dieser Datei (bis zu 1 h) wieder anbieten -
+  // Drive setzt die Seitenleiste beim erneuten Anklicken der Datei zurück.
+  var lastResultId = null, lastData = null;
+  try {
+    lastResultId = CacheService.getUserCache().get(_drivePdfLastResultKey_(item.id));
+    if (lastResultId) lastData = _loadDrivePdfResult_(lastResultId);
+  } catch (cacheErr) { lastData = null; }
+  if (lastData) {
+    var lastSection = CardService.newCardSection().setHeader('🕘 ' + _ct_('d.lastCheck'));
+    lastSection.addWidget(CardService.newTextParagraph().setText(_ct_('d.lastCheckText', { n: lastData.issues.length })));
+    lastSection.addWidget(_cardButton_(false)
+      .setText(_ct_('d.showLast'))
+      .setOnClickAction(CardService.newAction()
+        .setFunctionName('apiShowDrivePdfResult')
+        .setParameters({ resultId: lastResultId })));
+    card.addSection(lastSection);
+  }
+
+  var section = CardService.newCardSection();
+  section.addWidget(CardService.newTextParagraph()
+    .setText(_ct_('d.intro')));
+  section.addWidget(CardService.newTextParagraph()
+    .setText('<i>' + _ct_('d.rulesNote') + '</i>'));
+
+  var langSelect = CardService.newSelectionInput()
+    .setType(CardService.SelectionInputType.DROPDOWN)
+    .setTitle(_ct_('d.language'))
+    .setFieldName('language');
+  // Zuletzt verwendete Sprache vorauswaehlen statt immer DE.
+  var lastLang = PropertiesService.getUserProperties().getProperty(DRIVE_PDF_LAST_LANG_KEY) || 'de';
+  DRIVE_PDF_LANGUAGES.forEach(function(pair) {
+    langSelect.addItem(_ctLangName_(pair[0], pair[1]), pair[0], pair[0] === lastLang);
+  });
+  section.addWidget(langSelect);
+
+  // "PDF prüfen" öffnet das PDF-Fenster, das alle Etappen automatisch abarbeitet
+  // (DrivePdfWeb.gs). Ohne Web-App-URL: wie bisher schrittweise im Seitenbereich.
+  var params = { fileId: item.id, fileName: item.title };
+  var hasWindow = !!_drivePdfWebAppUrl_();
+  card.addSection(section);
+  var choices = CardService.newCardSection();
+  choices.addWidget(CardService.newDivider());
+  _cardChoice_(choices, 'fact_check', _ct_('d.checkPdf'), _ct_(hasWindow ? 'd.checkPdfSub' : 'd.checkInPanelSub'),
+    CardService.newAction()
+      .setFunctionName(hasWindow ? 'apiOpenDrivePdfWindow' : 'apiCheckDrivePdf')
+      .setParameters(params)
+      .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  if (hasWindow) {
+    _cardChoice_(choices, 'view_sidebar', _ct_('d.checkInPanel'), _ct_('d.checkInPanelSub'),
+      CardService.newAction()
+        .setFunctionName('apiCheckDrivePdf')
+        .setParameters(params)
+        .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  }
+  card.addSection(choices);
+  return card.build();
+}
+
+// Einheitliche Buttons in allen Karten: Hauptaktion gefuellt, Nebenaktion getoent.
+function _cardButton_(primary) {
+  var b = CardService.newTextButton();
+  var st = CardService.TextButtonStyle || {};
+  var style = primary ? st.FILLED : (st.FILLED_TONAL || st.OUTLINED);
+  try { if (style) b.setTextButtonStyle(style); } catch (e) {}
+  return b;
+}
+
+// Auswahl-Zeile wie die Buttons der Startseite (HomeChooser.html) und des
+// PDF-Fensters: Symbol, fetter Titel, Unterzeile, die ganze Zeile klickbar.
+// Karten erlauben kein eigenes HTML/CSS - DecoratedText kommt dem am naechsten.
+// Beide Optionen eines Paars sehen so gleich aus (frueher: blauer und
+// hellblauer Button). Danach ein Trenner, damit die Zeilen als Kaesten lesbar sind.
+function _cardChoice_(section, materialIcon, title, sub, action) {
+  var row = CardService.newDecoratedText()
+    .setText('<b>' + _escapeCardHtml_(title) + '</b>')
+    .setBottomLabel(sub)
+    .setWrapText(true)
+    .setOnClickAction(action);
+  try {
+    row.setStartIcon(CardService.newIconImage().setMaterialIcon(CardService.newMaterialIcon().setName(materialIcon)));
+  } catch (e) {}
+  try {
+    row.setEndIcon(CardService.newIconImage().setMaterialIcon(CardService.newMaterialIcon().setName('chevron_right')));
+  } catch (e) {}
+  section.addWidget(row);
+  section.addWidget(CardService.newDivider());
+}
+
+function _buildDriveInfoCard_(title, message) {
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader().setTitle(title));
+  card.addSection(CardService.newCardSection()
+    .addWidget(CardService.newTextParagraph().setText(message)));
+  return card.build();
+}
+
+function _drivePdfLanguageName_(code) {
+  var match = DRIVE_PDF_LANGUAGES.find(function(p) { return p[0] === code; });
+  return match ? match[1] : code;
+}
+
+function _drivePdfResultCacheKey_(resultId) {
+  return 'DRIVE_PDF_RESULT_' + resultId;
+}
+
+
+
+function apiCheckDrivePdf(e) {
+  _driveRequireScopes_();
+  var started = Date.now();
+  var fileId = e.parameters.fileId;
+  var fileName = e.parameters.fileName || 'PDF';
+  var language = (e.formInput && e.formInput.language) || 'de';
+
+  try {
+    try { PropertiesService.getUserProperties().setProperty(DRIVE_PDF_LAST_LANG_KEY, language); } catch (propErr) {}
+    _driveGeminiConfig_(); // bricht früh ab, wenn kein API-Key konfiguriert ist
+
+    var job = _drivePdfNewJob_(fileId, fileName, language);
+    return _drivePdfCardResponse_(job, _drivePdfAdvance_(job, started, _drivePdfLimits_(false)));
+  } catch (err) {
+    return _drivePdfErrorResponse_(err);
+  }
+}
+
+// Neuen Prüf-Job anlegen (gemeinsam für Seitenbereich und PDF-Fenster).
+function _drivePdfNewJob_(fileId, fileName, language) {
+  // Reste abgebrochener Pruefungen (Fenster geschlossen) aufraeumen.
+  try { _tcSweepTempFiles_(); } catch (sweepErr) { Logger.log('_drivePdfNewJob_: Aufraeumen fehlgeschlagen: ' + sweepErr); }
+  var file = DriveApp.getFileById(fileId);
+  if (file.getMimeType && file.getMimeType() !== 'application/pdf') {
+    throw new Error(_ct_('d.onlyPdfText', { name: _escapeCardHtml_(fileName || file.getName()) }).replace(/<[^>]+>/g, ''));
+  }
+  var fileSize = file.getSize();
+  if (fileSize > DRIVE_PDF_SHRINK_MAX_BYTES) {
+    throw new Error('The PDF file is too large (' + _driveMb_(fileSize) + ' MB, limit: ' + _driveMb_(DRIVE_PDF_SHRINK_MAX_BYTES) + ' MB). Please split it, e.g. into the pages of one language.');
+  }
+  return { fileId: fileId, fileName: fileName || file.getName(), language: language, fileSize: fileSize,
+           imagesRemoved: 0, imagesKept: 0, phase: 'plan', prep: {}, parts: [], extraFiles: [],
+           next: 0, batch: DRIVE_PDF_BATCH_PARTS, lastBatchMs: 0, inflight: null, issues: [], failedRanges: [] };
+}
+
+/**
+ * Zeitbudgets: Karten-Aktion im Seitenbereich (hartes Limit ~30 s) bzw.
+ * PDF-Fenster (google.script.run, Limit 6 min - dort wird mit Reserve bis ca.
+ * 4 min gearbeitet, danach ruft das Fenster automatisch die nächste Etappe auf).
+ */
+function _drivePdfLimits_(web) {
+  return web
+    // Im Fenster kurze Aufrufe (~20-45 s), damit Fortschritt und Restzeit laufend
+    // aktualisiert werden; das Limit dort (6 min) wird damit nie knapp.
+    ? { web: true, prepStart: 20000, prepLimit: 40000, checkStart: 25000, checkLimit: 55000 }
+    : { web: false, prepStart: DRIVE_PREP_START_BEFORE_MS, prepLimit: DRIVE_PREP_LIMIT_MS,
+        checkStart: DRIVE_PDF_START_BATCH_BEFORE_MS, checkLimit: DRIVE_PDF_ACTION_LIMIT_MS };
+}
+
+// Status aus _drivePdfAdvance_/_drivePdfCheckStep_ in eine Karten-Antwort umsetzen.
+function _drivePdfCardResponse_(job, status) {
+  var card;
+  if (status.done) {
+    card = _buildDrivePdfResultsCard_(status.resultId, job.fileName, job.issues,
+      { fileSize: job.fileSize, imagesRemoved: job.imagesRemoved, imagesKept: job.imagesKept, failedRanges: job.failedRanges, docResult: job.docResult });
+  } else if (job.phase === 'check') {
+    card = _buildDrivePdfProgressCard_(job, job.parts);
+  } else {
+    card = _buildDrivePdfPrepCard_(job);
+  }
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().updateCard(card))
+    .build();
+}
+
+/**
+ * Card-Action "Continue": nächste Etappe der Prüfung. Der Zwischenstand (inkl.
+ * bisheriger Funde) liegt in einer Temp-Datei, deren ID der Button mitschickt.
+ */
+function apiCheckDrivePdfContinue(e) {
+  _driveRequireScopes_();
+  var started = Date.now();
+  try {
+    var job = _drivePdfLoadJob_(e.parameters.stateId);
+    return _drivePdfCardResponse_(job, _drivePdfContinue_(job, started, _drivePdfLimits_(false)));
+  } catch (err) {
+    return _drivePdfErrorResponse_(err);
+  }
+}
+
+// Nächste Etappe(n) eines geladenen Jobs: Vorbereitung fortsetzen oder prüfen.
+function _drivePdfContinue_(job, started, lim) {
+  if (job.phase && job.phase !== 'check') return _drivePdfAdvance_(job, started, lim);
+  return _drivePdfCheckStep_(job, started, lim);
+}
+
+// Gemessene Dauer je Phase (ms) und Anzahl Einheiten - nur fuer die Anzeige
+// "Verlauf & Ladezeiten" im PDF-Fenster.
+function _drivePdfTrackTime_(job, phase, ms) {
+  var tl = job.tl || (job.tl = {});
+  var e = tl[phase] || (tl[phase] = { ms: 0, n: 0 });
+  e.ms += ms;
+  e.n++;
+}
+
+// Eine Prüf-Etappe (Gemini) für einen fertig vorbereiteten Job.
+// Liefert { done: false } (Zwischenstand gespeichert) oder { done: true, resultId }.
+function _drivePdfCheckStep_(job, started, lim) {
+  // Nur für das (seltene) Zerlegen in Einzelseiten wird ein Paket als Text gebraucht.
+  function partText(p) {
+    return _pdfBytesToBinaryString_(_driveReadRanges_([{ file: p.file || job.tmpId, start: p.start, len: p.len }])[0]);
+  }
+  // Die letzte Etappe ist nicht fertig geworden (Zeitlimit) -> kleiner werden:
+  // erst weniger Pakete pro Etappe, dann das Paket in Einzelseiten zerlegen,
+  // und eine einzelne Seite, die selbst dafür zu lange braucht, überspringen.
+  if (job.inflight) {
+    var inf = job.inflight;
+    job.inflight = null;
+    job.lastBatchMs = 0;
+    var entry = job.parts[inf.next];
+    if (inf.size > 1) {
+      job.batch = Math.max(1, Math.floor(inf.size / 2));
+    } else if (entry.to - entry.from > 1) {
+      // Schon ein einzelnes Paket ist zu langsam: alle restlichen Pakete in
+      // Einzelseiten zerlegen (von hinten, damit die Indizes stimmen).
+      for (var k = job.parts.length - 1; k >= inf.next; k--) {
+        if (job.parts[k].to - job.parts[k].from > 1) _drivePdfSplitEntry_(job, k, partText(job.parts[k]));
+      }
+    } else {
+      job.failedRanges.push((entry.from + 1) + '-' + entry.to);
+      job.next++;
+    }
+    Logger.log('apiCheckDrivePdfContinue: Etappe ab Paket ' + (inf.next + 1) + ' (' + inf.size + ' Paket(e)) am Zeitlimit abgebrochen -> ' +
+      (inf.size > 1 ? job.batch + ' pro Etappe' : (entry.to - entry.from > 1 ? 'restliche Pakete in Einzelseiten zerlegt' : 'Seite übersprungen')));
+  }
+  // Die letzte Etappe war knapp am Limit -> vorsorglich kleinere Etappen,
+  // bevor Google die nächste Aktion hart abbricht.
+  if (job.lastBatchMs > DRIVE_PDF_BATCH_SLOW_MS && job.batch > 1) {
+    job.batch = Math.ceil(job.batch / 2);
+    Logger.log('apiCheckDrivePdfContinue: letzte Etappe ' + Math.round(job.lastBatchMs / 100) / 10 + ' s -> ' + job.batch + ' Paket(e) pro Etappe');
+  }
+  // Pakete NICHT alle vorab laden (das kostete bei großen PDFs ~20 s pro Klick):
+  // _drivePdfWork_ holt pro Etappe nur die benötigten Bytes per Range-Anfrage.
+  var parts = job.parts.map(function(p) { return { from: p.from, to: p.to, entry: p }; });
+  return _drivePdfWork_(job, parts, started, lim, function(batch) {
+    var need = batch.filter(function(part) { return !part.bytes && part.text === undefined; });
+    var data = _driveReadRanges_(need.map(function(part) {
+      return { file: part.entry.file || job.tmpId, start: part.entry.start, len: part.entry.len };
+    }));
+    need.forEach(function(part, k) { part.bytes = data[k]; });
+  });
+}
+
+// ─── ETAPPENWEISE PRÜFUNG ─────────────────────────────────────────────────
+// Eine Add-on-Aktion wird nach 30 s hart abgebrochen (Google: Card-Service-
+// Callbacks max. 30 s, "Maximale Ausführungszeit überschritten"), und eine laufende
+// Gemini-Anfrage lässt sich nicht unterbrechen. Deshalb wird pro Aktion nur
+// eine Etappe nach der anderen gestartet (DRIVE_PDF_BATCH_PARTS Pakete parallel),
+// solange die gemessene Dauer der letzten Etappe noch sicher in die Restzeit
+// passt. Danach zeigt die Card den Fortschritt und einen "Continue"-Button.
+var DRIVE_PDF_BATCH_PARTS = 8;               // Seitenpakete pro Etappe (parallel)
+var DRIVE_PDF_START_BATCH_BEFORE_MS = 8000;  // neue Etappe nur, wenn so viel Zeit noch nicht verbraucht ist ...
+var DRIVE_PDF_ACTION_LIMIT_MS = 24000;       // ... und die letzte Etappendauer darunter bleiben würde (Limit 30 s)
+var DRIVE_PDF_BATCH_SLOW_MS = 16000;         // dauerte eine Etappe länger, wird die nächste halbiert
+var DRIVE_PDF_DIRECT_BEFORE_MS = 5000;       // Ein-Paket-PDF nur direkt prüfen, wenn die Vorbereitung so schnell war ...
+var DRIVE_PDF_DIRECT_MAX_BYTES = 4 * 1024 * 1024; // ... und das Paket höchstens so groß ist
+
+function _drivePdfSaveJob_(job) {
+  if (!job.stateId) {
+    job.stateId = _tcFolder_('temp').createFile('.authorcheck-state-' + Utilities.getUuid() + '.json', '{}', 'application/json').getId();
+  }
+  DriveApp.getFileById(job.stateId).setContent(JSON.stringify(job));
+}
+
+function _drivePdfLoadJob_(stateId) {
+  // Zwischenstaende werden nach der Pruefung endgueltig geloescht (Folders.gs).
+  var file;
+  try { file = DriveApp.getFileById(stateId); } catch (e) { file = null; }
+  if (!file || file.isTrashed()) throw new Error('This check has already finished. Please start a new check if needed.');
+  var job = JSON.parse(file.getBlob().getDataAsString());
+  job.stateId = stateId;
+  return job;
+}
+
+// Zerlegt das Paket job.parts[idx] (Text: text) in Einzelseiten, abgelegt in
+// einer eigenen Temp-Datei.
+function _drivePdfSplitEntry_(job, idx, text) {
+  var entry = job.parts[idx];
+  var splitter = pdfPageSplitter_(pdfRebuild_(_pdfStringReader_(text)));
+  var pieces = [];
+  for (var i = 0; i < splitter.pageCount; i++) pieces.push(splitter.build(i, i + 1));
+  var fileId = _tcFolder_('temp').createFile(Utilities.newBlob(
+    _pdfBinaryStringToBytes_(pieces.join('')), 'application/octet-stream',
+    '.authorcheck-temp-' + Utilities.getUuid() + '.bin')).getId();
+  job.extraFiles = (job.extraFiles || []).concat([fileId]);
+  var pos = 0;
+  var entries = pieces.map(function(piece, i) {
+    var en = { from: entry.from + i, to: entry.from + i + 1, start: pos, len: piece.length, file: fileId };
+    pos += piece.length;
+    return en;
+  });
+  Array.prototype.splice.apply(job.parts, [idx, 1].concat(entries));
+}
+
+function _drivePdfCleanupJob_(job) {
+  [job.tmpId, job.stateId].concat(job.extraFiles || []).forEach(function(id) {
+    if (id) _tcDeleteFile_(id);
+  });
+}
+
+// Liest Byte-Bereiche aus Drive-Dateien (parallel) und liefert sie als Byte-Arrays.
+function _driveReadRanges_(ranges) {
+  var token = ScriptApp.getOAuthToken();
+  var responses = UrlFetchApp.fetchAll(ranges.map(function(r) {
+    return {
+      url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(r.file) + '?alt=media&supportsAllDrives=true',
+      headers: { Authorization: 'Bearer ' + token, Range: 'bytes=' + r.start + '-' + (r.start + r.len - 1) },
+      muteHttpExceptions: true
+    };
+  }));
+  return responses.map(function(res, k) {
+    var code = res.getResponseCode();
+    if (code !== 206 && code !== 200) throw new Error('Drive download failed (HTTP ' + code + ').');
+    var bytes = res.getContent();
+    if (code === 200 && bytes.length > ranges[k].len) bytes = bytes.slice(ranges[k].start, ranges[k].start + ranges[k].len);
+    return bytes;
+  });
+}
+
+// loadBatch (optional): lädt die Bytes der Pakete einer Etappe nach (part.bytes).
+function _drivePdfWork_(job, parts, started, lim, loadBatch) {
+  var cfg = _driveGeminiConfig_();
+  var prompt = _drivePdfPrompt_(job);
+  if (job.docPrompts === undefined) {
+    var langRules = _rulesLanguageSupported_(job.language) ? apiGetRulesConfig(job.language) : [];
+    job.docPrompts = _docPromptsFromRules_(langRules.filter(function(r) { return r.IsEnabled; }));
+    try { job.docNotes = _docPromptNotes_(job.language, langRules); }
+    catch (noteErr) { Logger.log('_drivePdfWork_: Hinweise nicht ermittelt: ' + noteErr); job.docNotes = []; }
+  }
+  var seen = {};
+  job.issues.forEach(function(issue) { seen[issue.original + '\u0000' + issue.suggestion] = true; });
+
+  var batchesHere = 0;
+  while (job.next < parts.length) {
+    // Die erste Etappe einer Aktion läuft immer (dafür ist der Klick da); weitere
+    // nur, wenn die Dauer der letzten Etappe noch sicher in die Restzeit passt.
+    var elapsed = Date.now() - started;
+    if (batchesHere > 0 && (elapsed > lim.checkStart ||
+        elapsed + job.lastBatchMs * 1.2 > lim.checkLimit)) break;
+    batchesHere++;
+
+    var batch = parts.slice(job.next, job.next + job.batch);
+    var issuesBefore = job.issues.length;
+    var wallStart = Date.now(); // komplette Etappe inkl. Laden/Speichern (fuer die Restzeit-Schaetzung)
+    if (job.stateId) {
+      // Vor dem Start vermerken: bricht diese Etappe am Zeitlimit ab, nimmt der
+      // nächste "Continue"-Klick automatisch kleinere Etappen.
+      job.inflight = { next: job.next, size: batch.length };
+      _drivePdfSaveJob_(job);
+    }
+    if (loadBatch) loadBatch(batch);
+    var t0 = Date.now();
+    var startedAfter = Math.round((t0 - started) / 100) / 10;
+    var result = _drivePdfRunBatch_(cfg, prompt, batch, parts.length > 1);
+    batch.forEach(function(part) { part.bytes = null; part.text = null; });
+    job.lastBatchMs = Date.now() - t0;
+    Logger.log('_drivePdfWork_: Etappe mit ' + batch.length + ' Paket(en) (Seiten ' + (batch[0].from + 1) + '-' +
+      batch[batch.length - 1].to + ') dauerte ' + Math.round(job.lastBatchMs / 100) / 10 + ' s (gestartet nach ' + startedAfter + ' s)');
+    result.issues.forEach(function(issue) {
+      var key = issue.original + '\u0000' + issue.suggestion;
+      if (seen[key]) return;
+      seen[key] = true;
+      job.issues.push(issue);
+    });
+    job.failedRanges = job.failedRanges.concat(result.failedRanges);
+    job.next += batch.length;
+    job.inflight = null;
+    job.lastBatchWallMs = Date.now() - wallStart;
+    _drivePdfTrackTime_(job, 'check', job.lastBatchWallMs);
+    // Verlauf fuer das PDF-Fenster (Seiten, gefundene Fehler, Dauer je Etappe).
+    job.checkLog = (job.checkLog || []).concat([{ from: batch[0].from + 1, to: batch[batch.length - 1].to,
+      n: job.issues.length - issuesBefore, ms: job.lastBatchWallMs }]).slice(-80);
+  }
+
+  if (job.next < parts.length) {
+    _drivePdfSaveJob_(job);
+    return { done: false };
+  }
+
+  // Gesamtdokument-Prompts (DocPrompts.gs): eigene Etappe mit der ganzen PDF.
+  if (job.docPrompts.length && !job.docReports) {
+    if (batchesHere > 0 && Date.now() - started > lim.checkStart) {
+      job.docPhase = true;
+      _drivePdfSaveJob_(job);
+      return { done: false };
+    }
+    _drivePdfDocStep_(job, cfg, lim, parts, started);
+    if (!job.docReports) { // zweiter Versuch mit dem Seitentext im naechsten Aufruf
+      job.docPhase = true;
+      _drivePdfSaveJob_(job);
+      return { done: false };
+    }
+  }
+  var docResult = job.docReports ? _finishDocPromptReports_(job.fileName, job.docReports, 'pdfs', job.docNotes)
+    : (job.docNotes && job.docNotes.length ? { url: '', items: [], notes: job.docNotes } : null);
+  // Befunde der Gesamtdokument-Prompts in die normale Liste: so landen sie auch in
+  // der kommentierten PDF und im Sheet.
+  if (job.docReports && !job.docIssuesMerged) {
+    _docPromptAllIssues_(job.docReports).forEach(function(issue) {
+      var key = issue.original + '\u0000' + issue.suggestion;
+      if (seen[key]) return;
+      seen[key] = true;
+      job.issues.push(issue);
+    });
+    job.docIssuesMerged = true;
+  }
+
+  _drivePdfCleanupJob_(job);
+  if (job.failedRanges.length && job.failedRanges.length === parts.length && !(docResult && docResult.url) && !job.issues.length) {
+    throw new Error('The AI request failed for all pages. Please try again.');
+  }
+  logAuditEvent_(getUserEmail_(), 'DRIVE_PDF_CHECK_RUN', job.fileName + ' - ' + job.issues.length + ' issue(s), ' + parts.length + ' part(s)' +
+    (job.failedRanges.length ? ', failed pages ' + job.failedRanges.join(',') : ''));
+
+  var resultId = Utilities.getUuid();
+  var cachePayload = { fileId: job.fileId, fileName: job.fileName, language: job.language, issues: job.issues, fileSize: job.fileSize,
+                       imagesRemoved: job.imagesRemoved, imagesKept: job.imagesKept, failedRanges: job.failedRanges,
+                       docResult: docResult };
+  try {
+    var cache = CacheService.getUserCache();
+    cache.put(_drivePdfResultCacheKey_(resultId), JSON.stringify(cachePayload), DRIVE_PDF_RESULT_CACHE_TTL);
+    // Merken, damit das Ergebnis beim erneuten Anklicken der Datei wieder angeboten wird.
+    cache.put(_drivePdfLastResultKey_(job.fileId), resultId, DRIVE_PDF_RESULT_CACHE_TTL);
+  } catch (cacheErr) {
+    Logger.log('_drivePdfWork_: result cache failed (result possibly too large): ' + cacheErr);
+  }
+  job.docResult = docResult;
+  return { done: true, resultId: resultId };
+}
+
+// Fuehrt die Gesamtdokument-Prompts eines Jobs aus und legt job.docReports an.
+// Nur im PDF-Fenster (6 min pro Aufruf) - im Seitenbereich (30 s) reicht die
+// Zeit fuer eine Anfrage ueber das ganze Dokument nicht.
+// Passt die (verkleinerte) PDF nicht in eine Anfrage (_docPromptPdfMaxBytes_)
+// oder scheitert die Anfrage mit PDF (z. B. 400/413 vom Proxy vor Gemini, der
+// oft weniger als 20 MB annimmt), laeuft der Prompt mit dem Text aller Seiten.
+// Frueher fehlte der Prompt dann im Ergebnis.
+var DRIVE_PDF_DOC_RETRY_BEFORE_MS = 150000; // spaeter im Aufruf: zweiter Versuch erst im naechsten Aufruf (Limit 6 min)
+
+function _drivePdfDocStep_(job, cfg, lim, parts, started) {
+  function failAll(msg) {
+    job.docReports = job.docPrompts.map(function(dp) { return { title: dp.title, error: msg }; });
+  }
+  if (!lim.web) return failAll('Whole-document prompts only run in the PDF window (not in the Drive side panel).');
+  // Ist der letzte Aufruf an dieser Stelle abgebrochen (Zeitlimit), nicht endlos wiederholen.
+  if (job.docInflight) return failAll('The whole-document check did not finish in time. Try a smaller PDF or a shorter prompt.');
+  var whole = job.whole;
+  if (!whole || !whole.len) return failAll('The PDF could not be prepared as a whole.');
+  job.docInflight = true;
+  if (job.stateId) _drivePdfSaveJob_(job);
+  var t0 = Date.now();
+  var bytes = _driveReadRanges_([{ file: whole.file, start: whole.start || 0, len: whole.len }])[0];
+  var pages = parts.length ? parts[parts.length - 1].to : 0;
+  var ctx = { fileName: job.fileName, pages: pages, isPdf: true };
+  var reports;
+  if (job.docRetry) {
+    // Fortsetzung: im letzten Aufruf mit PDF gescheitert, jetzt mit dem Seitentext.
+    reports = job.docPartial;
+    var again = _drivePdfDocTextRun_(job, cfg, job.docRetry.map(function(i) { return job.docPrompts[i]; }), bytes, pages);
+    job.docRetry.forEach(function(i, k) { reports[i] = again[k]; });
+    job.docRetry = null;
+    job.docPartial = null;
+  } else if (whole.len <= _docPromptPdfMaxBytes_()) {
+    try { reports = _runDocPrompts_(cfg, job.docPrompts, ctx, bytes); }
+    catch (fetchErr) {
+      Logger.log('_drivePdfDocStep_: Anfrage mit PDF fehlgeschlagen: ' + (fetchErr.message || fetchErr));
+      reports = job.docPrompts.map(function(dp) { return { title: dp.title, error: String(fetchErr.message || fetchErr), code: -1 }; });
+    }
+    var failed = [];
+    reports.forEach(function(r, i) { if (r.code) failed.push(i); });
+    if (failed.length) {
+      Logger.log('_drivePdfDocStep_: ' + failed.length + ' Prompt(s) mit PDF fehlgeschlagen (' +
+        failed.map(function(i) { return reports[i].code; }).join(', ') + ') - zweiter Versuch mit dem Seitentext');
+      if (Date.now() - started > DRIVE_PDF_DOC_RETRY_BEFORE_MS) {
+        job.docRetry = failed;
+        job.docPartial = reports;
+        job.docInflight = false;
+        _drivePdfTrackTime_(job, 'doc', Date.now() - t0);
+        return;
+      }
+      var retry = _drivePdfDocTextRun_(job, cfg, failed.map(function(i) { return job.docPrompts[i]; }), bytes, pages);
+      failed.forEach(function(i, k) { reports[i] = retry[k]; });
+    }
+  } else {
+    reports = _drivePdfDocTextRun_(job, cfg, job.docPrompts, bytes, pages);
+  }
+  job.docReports = reports;
+  job.docInflight = false;
+  job.docPhase = false;
+  _drivePdfTrackTime_(job, 'doc', Date.now() - t0);
+}
+
+// Gesamtdokument-Prompts mit dem Text aller Seiten statt der PDF.
+function _drivePdfDocTextRun_(job, cfg, docPrompts, bytes, pages) {
+  var texts;
+  try { texts = _pdfExtractPageTexts_(_pdfBytesToBinaryString_(bytes)); }
+  catch (e) {
+    Logger.log('_drivePdfDocTextRun_: Text nicht lesbar: ' + (e.message || e));
+    texts = [];
+  }
+  var total = texts.length || pages;
+  var chars = texts.join('').replace(/\s+/g, '').length;
+  if (chars < 200) {
+    var msg = _ct_('d.docNoText', { mb: _driveMb_(bytes.length) });
+    return docPrompts.map(function(dp) { return { title: dp.title, error: msg }; });
+  }
+  var text = texts.map(function(t, i) { return '=== Page ' + (i + 1) + ' of ' + total + ' ===\n' + t; }).join('\n\n');
+  var note = _ct_('d.docTextMode', { mb: _driveMb_(bytes.length), pages: total });
+  logAuditEvent_(getUserEmail_(), 'DOC_PROMPT_TEXT_MODE', job.fileName + ' - ' + _driveMb_(bytes.length) + ' MB, ' + total + ' pages, ' + text.length + ' chars');
+  return _runDocPrompts_(cfg, docPrompts, { fileName: job.fileName, pages: total, isPdf: false, fromPdf: true, text: text }, null)
+    .map(function(r) { if (!r.error) r.note = note; return r; });
+}
+
+/** Schickt eine Etappe (mehrere Seitenpakete parallel) an Gemini. */
+function _drivePdfRunBatch_(cfg, prompt, batch, isSplit) {
+  var requests = batch.map(function(part) {
+    var partPrompt = prompt;
+    if (isSplit) {
+      partPrompt += '\n\nThis file contains only pages ' + (part.from + 1) + ' to ' + part.to + ' of the original document ' +
+        '(the first page in this file is page ' + (part.from + 1) + '). In "location", always use these ORIGINAL page numbers.';
+    }
+    var call = _buildGeminiRequest_(cfg.apiUrl, cfg.model, cfg.apiKey, {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: partPrompt },
+          { inlineData: { mimeType: 'application/pdf', data: Utilities.base64Encode(part.bytes || _pdfBinaryStringToBytes_(part.text)) } }
+        ]
+      }],
+      generationConfig: { temperature: cfg.temperature }
+    });
+    return {
+      url: call.url, method: 'post', contentType: 'application/json',
+      headers: call.headers, payload: JSON.stringify(call.body), muteHttpExceptions: true
+    };
+  });
+  var responses = requests.length === 1
+    ? [_fetchGeminiWithRetry_(requests[0].url, requests[0], 1)]
+    : UrlFetchApp.fetchAll(requests);
+
+  var issues = [], failedRanges = [];
+  responses.forEach(function(res, idx) {
+    try {
+      _parseGeminiIssuesResponse_(res, 'AI request failed').forEach(function(issue) { issues.push(issue); });
+    } catch (partErr) {
+      failedRanges.push((batch[idx].from + 1) + '-' + batch[idx].to);
+      Logger.log('_drivePdfRunBatch_: Seiten ' + (batch[idx].from + 1) + '-' + batch[idx].to + ' fehlgeschlagen: ' + partErr.message);
+    }
+  });
+  return { issues: issues, failedRanges: failedRanges };
+}
+
+function _buildDrivePdfProgressCard_(job, parts) {
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader().setTitle('⏳ ' + _ct_('d.checking')).setSubtitle(job.fileName));
+  var section = CardService.newCardSection();
+  var pagesDone = job.next > 0 ? parts[job.next - 1].to : 0;
+  var pagesTotal = parts[parts.length - 1].to;
+  var intro = job.imagesRemoved
+    ? _ct_('d.prepared', { kept: job.imagesKept, removed: job.imagesRemoved }) + '<br>'
+    : '';
+  var btnLabel = _ct_(job.next === 0 ? 'd.start' : 'd.continue');
+  section.addWidget(CardService.newTextParagraph().setText(
+    (job.next === 0 ? intro + _ct_('d.ready', { pages: pagesTotal })
+                    : _ct_('d.progress', { done: pagesDone, total: pagesTotal, n: job.issues.length })) + '<br>' +
+    _ct_('d.stepsHelp', { btn: btnLabel })));
+  section.addWidget(_cardButton_(true)
+    .setText((job.next === 0 ? '▶️ ' : '⏩ ') + btnLabel)
+    .setOnClickAction(CardService.newAction()
+      .setFunctionName('apiCheckDrivePdfContinue')
+      .setParameters({ stateId: job.stateId })
+      .setLoadIndicator(CardService.LoadIndicator.SPINNER)));
+  card.addSection(section);
+  return card.build();
+}
+
+function _drivePdfPrompt_(job) {
+  var language = job.language;
+  var promptParts = _buildAuthorCheckPromptParts_(language, {
+    noGlossary: '(no specific entries found for this language)',
+    valueLabel: 'Value',
+    specificCheckPrefix: 'SPECIFIC CHECK',
+    noStandardRules: '(No standard rules)',
+    additionalChecksHeader: 'ADDITIONAL SPECIFIC PROMPTS/CHECKS'
+  });
+  var termListStr = promptParts.termListStr;
+  var rulesStr = promptParts.rulesStr;
+
+  var targetLanguageName = _drivePdfLanguageName_(language);
+
+  var prompt =
+    'You are a proofreading assistant for Kärcher texts (manufacturer of cleaning equipment: ' +
+    'high-pressure cleaners, sweepers, vacuum cleaners, accessories).\n\n' +
+    'IMPORTANT: The attached PDF document may contain text in multiple languages (e.g. a multilingual manual with several language sections). ' +
+    'Check ONLY the passages that are written in ' + targetLanguageName + '. ' +
+    'Completely ignore and skip any passages written in other languages, even if they appear right next to or interleaved with ' + targetLanguageName + ' text. ' +
+    'Do not report any issue whose "original" quote is not itself in ' + targetLanguageName + '.\n\n' +
+    (job.imagesRemoved ? 'NOTE: To reduce the file size, some large images were removed from this PDF. Empty areas where images used to be are expected - do not report them.\n\n' : '') +
+    'Within the ' + targetLanguageName + ' passages, check for these error types:\n' +
+    '1. GRAMMAR AND SPELLING ERRORS\n' +
+    '2. INCORRECT OR INCONSISTENT KÄRCHER TERMINOLOGY - compare against this list ' +
+    '"incorrect term -> correct term":\n' + termListStr + '\n' +
+    '3. SPECIFIC WRITING AND STYLE RULES:\n' + rulesStr + '\n\n' +
+    'Respond EXCLUSIVELY with valid JSON in exactly this structure, without markdown formatting, without code block:\n' +
+    '{"issues":[{"type":"grammar|terminology|style","location":"...","original":"...","suggestion":"...","explanation":"..."}]}\n\n' +
+    'Rules:\n' +
+    '- "type" is either "grammar", "terminology" or "style".\n' +
+    '- "location" is a short hint where in the document the passage can be found (e.g. page number, chapter, or language section), if identifiable, otherwise leave empty.\n' +
+    '- "original" must be an EXACT, contiguous quote from the document, and must itself be written in ' + targetLanguageName + '.\n' +
+    '- Only return genuine errors found in ' + targetLanguageName + ' passages. If no errors are found, return {"issues":[]}.';
+
+  return prompt;
+}
+
+function _drivePdfErrorResponse_(err) {
+  var errCard = CardService.newCardBuilder();
+  errCard.setHeader(CardService.newCardHeader().setTitle('⚠️ ' + _ct_('d.error')));
+  errCard.addSection(CardService.newCardSection()
+    .addWidget(CardService.newTextParagraph().setText(_escapeCardHtml_(err.message || String(err)))));
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().updateCard(errCard.build()))
+    .build();
+}
+
+
+function _driveGeminiConfig_() {
+  var props = PropertiesService.getScriptProperties();
+  var apiKey = (props.getProperty('GEMINI_API_KEY') || '').trim();
+  if (!apiKey) throw new Error('AI inspection is not configured (Gemini API Key missing).');
+  var rawUrl = props.getProperty('GEMINI_API_URL') || 'https://34-111-99-134.nip.io/gemini/v1beta/models/';
+  return {
+    apiKey: apiKey,
+    apiUrl: rawUrl.split(']')[0].replace('[', '').trim(),
+    model: (props.getProperty('AI_MODEL') || 'gemini-3.6-flash').trim(),
+    temperature: _aiTemperature_()
+  };
+}
+
+/**
+ * Baut die interaktive Ergebnis-Card: Zusammenfassung oben, darunter pro Fund
+ * eine Mini-"Issue-Card" mit Original -> Vorschlag, Erklärung.
+ *
+ * WICHTIG: Es gibt hier bewusst KEINEN "Add Note"-Button (Drive-API-Kommentare).
+ * Laut Googles eigener Drive-API-Doku unterstützt die Drive API für Blob-Dateien
+ * (u.a. PDFs) grundsätzlich keine verankerten Kommentare, und selbst nicht
+ * verankerte Kommentare werden in der PDF-Vorschau von Drive NIE angezeigt (nur
+ * über die API abrufbar) - ein Kommentar über die Drive-API wäre also für den
+ * Nutzer unsichtbar. Stattdessen gibt es "Open Annotated PDF": das schreibt
+ * echte PDF-Annotationsobjekte direkt in eine Kopie der PDF-Bytes (siehe
+ * PdfAnnotate.gs) - diese Notizen SIND beim Öffnen der Datei sichtbar, in
+ * jedem PDF-Viewer, weil sie Teil des Dateiformats selbst sind, nicht von
+ * Drive verwaltete Metadaten. "Export as Sheet" bleibt als tabellarische
+ * Alternative bestehen.
+ */
+// info (optional): { fileSize, imagesRemoved, imagesKept, failedRanges } -
+// imagesRemoved > 0 heißt, die PDF wurde für den Check verkleinert (PdfShrink.gs).
+function _buildDrivePdfResultsCard_(resultId, fileName, issues, info) {
+  info = info || {};
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader()
+    .setTitle((issues.length ? '🔎 ' : '🎉 ') + _ct_('d.issuesFound', { n: issues.length }))
+    .setSubtitle(fileName));
+
+  var topSection = CardService.newCardSection();
+  if (info.imagesRemoved) {
+    topSection.addWidget(CardService.newTextParagraph().setText(
+      '<i>' + _ct_('d.shrunk', { mb: _driveMb_(info.fileSize), kept: info.imagesKept, removed: info.imagesRemoved }) + '</i>'));
+  }
+  if (info.failedRanges && info.failedRanges.length) {
+    topSection.addWidget(CardService.newTextParagraph().setText(
+      '⚠️ ' + _ct_('d.failedPages', { pages: _escapeCardHtml_(info.failedRanges.join(', ')) })));
+  }
+  // Bericht der Gesamtdokument-Prompts (DocPrompts.gs)
+  var doc = info.docResult;
+  if (doc) {
+    (doc.notes || []).forEach(function(n) {
+      topSection.addWidget(CardService.newTextParagraph().setText('ℹ️ ' + _escapeCardHtml_(n)));
+    });
+    (doc.items || []).forEach(function(it) {
+      if (it.note && !it.error) topSection.addWidget(CardService.newTextParagraph().setText('ℹ️ <b>' + _escapeCardHtml_(it.title) + ':</b> ' + _escapeCardHtml_(it.note)));
+    });
+    if (doc.url) {
+      topSection.addWidget(_cardButton_(true).setText('📄 ' + _ct_('d.docReport'))
+        .setOpenLink(CardService.newOpenLink().setUrl(doc.url)));
+    }
+    (doc.items || []).forEach(function(it) {
+      if (it.error) topSection.addWidget(CardService.newTextParagraph().setText('⚠️ <b>' + _escapeCardHtml_(it.title) + ':</b> ' + _escapeCardHtml_(it.error)));
+    });
+    if (doc.error) topSection.addWidget(CardService.newTextParagraph().setText('⚠️ ' + _escapeCardHtml_(doc.error)));
+  }
+  if (!issues.length) {
+    topSection.addWidget(CardService.newTextParagraph().setText('✅ ' + _ct_('d.noErrors')));
+    card.addSection(topSection);
+    return card.build();
+  }
+
+  topSection.addWidget(CardService.newDivider());
+  _cardChoice_(topSection, 'edit_note', _ct_('d.openAnnotated') + ' (' + issues.length + ')', _ct_('d.annotSub'),
+    CardService.newAction()
+      .setFunctionName('apiExportDrivePdfAnnotated')
+      .setParameters({ resultId: resultId })
+      .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  _cardChoice_(topSection, 'table_chart', _ct_('d.exportSheet') + ' (' + issues.length + ')', _ct_('d.sheetSub'),
+    CardService.newAction()
+      .setFunctionName('apiExportDrivePdfResultToSheet')
+      .setParameters({ resultId: resultId })
+      .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  topSection.addWidget(CardService.newTextParagraph()
+    .setText('<i>' + _ct_('d.annotHelp') +
+      (info.fileSize > DRIVE_PDF_ANNOTATE_MAX_BYTES ? ' ' + _ct_('d.annotHelpLarge') : '') + '</i>'));
+  card.addSection(topSection);
+
+  var shown = issues.slice(0, DRIVE_PDF_MAX_CARD_ISSUES);
+  shown.forEach(function(issue) {
+    var section = CardService.newCardSection();
+    var type = _issueTypeKey_(issue);
+    var typeLabel = (type === 'prompt' && issue.rule ? issue.rule : _ct_('type.' + type)).toUpperCase();
+    var locationLabel = issue.location ? ' - ' + issue.location : '';
+    section.addWidget(CardService.newTextParagraph()
+      .setText('<b>' + _escapeCardHtml_(typeLabel) + '</b>' + _escapeCardHtml_(locationLabel)));
+    section.addWidget(CardService.newTextParagraph()
+      .setText('<s>' + _escapeCardHtml_(issue.original) + '</s> &rarr; ' + _escapeCardHtml_(issue.suggestion)));
+    if (issue.explanation) {
+      section.addWidget(CardService.newTextParagraph().setText(_escapeCardHtml_(issue.explanation)));
+    }
+    card.addSection(section);
+  });
+
+  if (issues.length > shown.length) {
+    var moreSection = CardService.newCardSection();
+    moreSection.addWidget(CardService.newTextParagraph()
+      .setText('➕ ' + _ct_('d.more', { n: issues.length - shown.length })));
+    card.addSection(moreSection);
+  }
+
+  return card.build();
+}
+
+// CardService-TextParagraph unterstützt ein kleines HTML-Subset (b/s/i/...),
+// daher hier - analog zu esc() in den Sidebar-HTMLs - Nutzertext/KI-Text vor der
+// Einbettung escapen, statt rohen Text in setText() zu interpolieren.
+function _driveMb_(bytes) {
+  return (Math.round(bytes / (1024 * 1024) * 10) / 10).toString();
+}
+
+function _escapeCardHtml_(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _drivePdfLastResultKey_(fileId) {
+  return 'drivepdf_last_' + fileId;
+}
+
+/** Card-Action: zeigt das zuletzt gespeicherte Prüfergebnis einer Datei wieder an. */
+function apiShowDrivePdfResult(e) {
+  _driveRequireScopes_();
+  try {
+    var resultId = e.parameters.resultId;
+    var data = _loadDrivePdfResult_(resultId);
+    return CardService.newActionResponseBuilder()
+      .setNavigation(CardService.newNavigation().pushCard(_buildDrivePdfResultsCard_(resultId, data.fileName, data.issues,
+        { fileSize: data.fileSize, imagesRemoved: data.imagesRemoved, imagesKept: data.imagesKept, failedRanges: data.failedRanges || [], docResult: data.docResult })))
+      .build();
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(err.message || String(err)))
+      .build();
+  }
+}
+
+function _loadDrivePdfResult_(resultId) {
+  var raw = CacheService.getUserCache().get(_drivePdfResultCacheKey_(resultId));
+  if (!raw) throw new Error('This result has expired. Please run the PDF check again.');
+  return JSON.parse(raw);
+}
+
+/**
+ * Card-Action-Variante von _buildDrivePdfReportSheet_: nutzt das bereits
+ * gecachte Prüfergebnis (kein erneuter Gemini-Call nötig) und öffnet das Sheet.
+ */
+function apiExportDrivePdfResultToSheet(e) {
+  _driveRequireScopes_();
+  try {
+    var data = _loadDrivePdfResult_(e.parameters.resultId);
+    var sheetUrl = _buildDrivePdfReportSheet_(data.issues, data.fileName, data.language);
+    return CardService.newActionResponseBuilder()
+      .setOpenLink(CardService.newOpenLink().setUrl(sheetUrl))
+      .build();
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(_ct_('d.exportError', { msg: err.message || String(err) })))
+      .build();
+  }
+}
+
+/**
+ * Card-Action: erzeugt eine ANNOTIERTE KOPIE der PDF (echte, im Viewer sichtbare
+ * PDF-Kommentare, siehe PdfAnnotate.gs) und öffnet sie. Nutzt das bereits
+ * gecachte Prüfergebnis (kein erneuter Gemini-Call nötig), lädt aber die
+ * Original-PDF-Bytes erneut, da diese - anders als das Textergebnis - nicht
+ * mit in den Cache passen.
+ */
+function apiExportDrivePdfAnnotated(e) {
+  _driveRequireScopes_();
+  var started = Date.now();
+  try {
+    var data = _loadDrivePdfResult_(e.parameters.resultId);
+    if (data.fileSize > DRIVE_PDF_ANNOTATE_MAX_BYTES) {
+      var r = _driveLargeAnnotatedStart_(data.fileId, data.fileName, data.issues, started);
+      if (!r.done) {
+        return CardService.newActionResponseBuilder()
+          .setNavigation(CardService.newNavigation().pushCard(_buildDrivePdfAnnotateProgressCard_(r.state)))
+          .build();
+      }
+      return CardService.newActionResponseBuilder().setOpenLink(CardService.newOpenLink().setUrl(r.url)).build();
+    }
+    var built = _buildAnnotatedPdfFile_(data.fileId, data.fileName, data.issues);
+    return CardService.newActionResponseBuilder()
+      .setOpenLink(CardService.newOpenLink().setUrl(built.url))
+      .build();
+  } catch (err) {
+    // Bewusst kein technischer Rohtext (z.B. "compressed object stream") in der
+    // Notification, nur eine Zeile plus Alternative - der Grund landet im Log.
+    Logger.log('apiExportDrivePdfAnnotated: ' + (err.message || err));
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(_ct_('d.annotFailed')))
+      .build();
+  }
+}
+
+/**
+ * Lädt die Original-PDF-Bytes erneut und sucht pro Fund issue.original im
+ * rekonstruierten Seitentext (PdfTextPosition.gs: Schriften inkl. ToUnicode
+ * und Zeichenbreiten werden ausgewertet). Bei einem Treffer werden genau die
+ * betroffenen Wörter gelb markiert (Highlight-Annotation, eine Box pro
+ * Textzeile) und die Sticky-Note sitzt auf Höhe der Stelle im Seitenrand
+ * daneben. Wenn keine Textposition gefunden wird (z.B. gescannte Seite ohne
+ * Textebene, nicht unterstützter Stream-Filter, oder das Zitat kommt so im
+ * Dokument nicht vor), fällt die einzelne Notiz automatisch auf die alte
+ * Stapel-oben-links-Platzierung auf der von Gemini genannten Seite zurück
+ * (siehe buildAnnotatedPdfBytes_ in PdfAnnotate.gs) - nie ein harter Fehler.
+ * Legt das Ergebnis als neue Datei in Drive ab und gibt deren URL zurück.
+ * Wirft weiter, wenn die PDF-Struktur selbst nicht auffindbar war (siehe
+ * PdfAnnotate.gs) - der Aufrufer fängt das ab.
+ */
+// Zeit fuer die Positionssuche: Card-Aktionen duerfen 30 s laufen, das
+// PDF-Fenster (google.script.run) 6 min.
+var PDF_ANNOT_SEARCH_MS_CARD = 12000;
+var PDF_ANNOT_SEARCH_MS_WEB = 120000;
+
+function _buildAnnotatedPdfFile_(fileId, fileName, issues, searchMs) {
+  var deadline = Date.now() + (searchMs || PDF_ANNOT_SEARCH_MS_CARD);
+  var blob = DriveApp.getFileById(fileId).getBlob();
+  var bytes = blob.getBytes();
+  var text = _pdfBytesToBinaryString_(bytes);
+
+  var rootNum = _pdfFindRootRef_(text);
+  var offsets = _pdfScanObjectOffsets_(text);
+  var doc = _pdfOpenDoc_(text, offsets);
+  var pages = _pdfCollectPages_(text, offsets, rootNum, doc);
+  var result = _drivePdfComputeAnnotations_(doc, pages, issues, deadline);
+
+  var newBytes = buildAnnotatedPdfBytes_(bytes, result.pageAnnotations);
+  var outName = fileName.replace(/\.pdf$/i, '') + ' (annotated).pdf';
+  var newBlob = Utilities.newBlob(newBytes, 'application/pdf', outName);
+  var file = _tcFolder_('pdfs').createFile(newBlob);
+  logAuditEvent_(getUserEmail_(), 'DRIVE_PDF_ANNOTATED', fileName + ' - ' + result.count + ' annotation(s), ' + result.positioned + ' precisely positioned -> ' + file.getId());
+  return { done: true, url: file.getUrl(), count: result.count, issuesTotal: result.total };
+}
+
+/**
+ * Sucht jeden Fund im Seitentext (PdfTextPosition.gs) und baut daraus die
+ * Annotationen pro Seite. doc/pages: siehe _pdfOpenDoc_ / _pdfCollectPages_.
+ * Liefert { pageAnnotations, count, positioned }.
+ */
+// deadline (ms seit 1970, optional): danach wird ein Fund nur noch auf der
+// von Gemini genannten Seite gesucht statt in allen Seiten - jeder Fund
+// bekommt trotzdem seine Notiz (notfalls oben links auf dieser Seite).
+function _drivePdfComputeAnnotations_(doc, pages, issues, deadline) {
+  // Pro Seite wird der Content-Stream nur EINMAL dekomprimiert/interpretiert
+  // und dann für alle Funde wiederverwendet (Laufzeit).
+  var pageModelCache = {};
+  function getPageModel(pageIdx) {
+    if (pageIdx in pageModelCache) return pageModelCache[pageIdx];
+    var model = null;
+    try {
+      var glyphs = _pdfExtractPageGlyphs_(doc, pages[pageIdx]);
+      if (glyphs && glyphs.length) model = _pdfBuildPageModel_(glyphs);
+    } catch (e) {
+      Logger.log('_drivePdfComputeAnnotations_: Seite ' + pageIdx + ' - Content-Stream nicht auswertbar: ' + e.message);
+    }
+    pageModelCache[pageIdx] = model;
+    return model;
+  }
+
+  var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
+  var pageAnnotations = {};
+  var iconsOnPage = {};     // pageIdx -> bereits belegte Icon-Rechtecke
+  var occurrenceUsed = {};  // gleiches Zitat mehrfach gemeldet -> nächstes Vorkommen nehmen
+  var positioned = 0;
+
+  capped.forEach(function(issue) {
+    var guessedPage = _pdfGuessPageIndex_(issue.location);
+    if (guessedPage === null || guessedPage < 0 || guessedPage >= pages.length) guessedPage = 0;
+
+    // Erst die von Gemini genannte Seite versuchen, danach alle anderen -
+    // der tatsächliche Textinhalt ist zuverlässiger als Geminis Seitenangabe.
+    var matchedPage = null, hit = null;
+    var searchOrder = [guessedPage];
+    if (!deadline || Date.now() < deadline) {
+      for (var p = 0; p < pages.length; p++) { if (p !== guessedPage) searchOrder.push(p); }
+    }
+    for (var si = 0; si < searchOrder.length && issue.original; si++) {
+      var model = getPageModel(searchOrder[si]);
+      if (!model) continue;
+      var occKey = searchOrder[si] + '|' + String(issue.original).toLowerCase();
+      var h = _pdfFindQuoteOnPage_(model, issue.original, occurrenceUsed[occKey] || 0);
+      if (h) {
+        matchedPage = searchOrder[si];
+        hit = h;
+        occurrenceUsed[occKey] = (occurrenceUsed[occKey] || 0) + 1;
+        break;
+      }
+    }
+
+    var pageIdx = matchedPage !== null ? matchedPage : guessedPage;
+
+    var type = _issueTypeKey_(issue);
+    var typeLabel = (type === 'prompt' && issue.rule ? issue.rule : _ct_('type.' + type)).toUpperCase();
+    var contents = '[' + typeLabel + ']\n' + issue.original + '\n\n-> ' + issue.suggestion +
+      (issue.explanation ? '\n\n' + issue.explanation : '') +
+      (issue.location ? '\n\n(AI-reported location: ' + issue.location + ')' : '');
+    var ann = { contents: contents, title: 'Author Check (' + typeLabel + ')' };
+
+    if (hit) {
+      positioned++;
+      ann.highlight = hit.boxes;
+      if (!iconsOnPage[pageIdx]) iconsOnPage[pageIdx] = [];
+      ann.rect = _pdfPlaceNoteIcon_(pages[pageIdx].mediaBox || [0, 0, 612, 792],
+        getPageModel(pageIdx), hit.boxes[0], iconsOnPage[pageIdx]);
+    } // sonst: kein rect -> automatischer Stapel-Fallback oben links
+
+    if (!pageAnnotations[pageIdx]) pageAnnotations[pageIdx] = [];
+    pageAnnotations[pageIdx].push(ann);
+  });
+
+  return { pageAnnotations: pageAnnotations, count: capped.length, total: issues.length, positioned: positioned };
+}
+
+// ─── ANNOTIERTE KOPIE GROSSER PDFs (über 50 MB) ───────────────────────────
+// Apps Script kann Dateien über 50 MB weder komplett laden noch als Ganzes
+// speichern. Ein Incremental Update hängt aber nur Daten ans ENDE der
+// unveränderten Original-PDF an. Deshalb:
+//  1. Positionen der Funde aus der verkleinerten Fassung berechnen (gleiche
+//     Objektnummern wie das Original, Bilder werden dafür nicht gebraucht) und
+//     daraus den Anhang bauen (pdfAnnotationUpdate_ in PdfAnnotate.gs).
+//  2. Das Original stückweise per Range-Anfrage lesen und über die "resumable
+//     upload"-Schnittstelle von Drive stückweise als neue Datei hochladen, am
+//     Ende den Anhang dazu.
+// Reicht die Zeit einer Aktion nicht, wird der Upload in der nächsten Aktion
+// fortgesetzt ("Continue"), die Upload-Sitzung bleibt bei Google eine Woche gültig.
+var DRIVE_UPLOAD_CHUNK = 16 * 1024 * 1024;     // Vielfaches von 256 KiB (Vorgabe von Drive)
+var DRIVE_ACTION_BUDGET_MS = 15000;            // danach Fortsetzung in der nächsten Aktion (Limit 30 s, ein Stück dauert mehrere s)
+
+function _driveLargeAnnotatedStart_(fileId, fileName, issues, started, budgetMs) {
+  var fileSize = DriveApp.getFileById(fileId).getSize();
+  var reader = _pdfDriveRangeReader_(fileId, fileSize);
+  var model = pdfRebuild_(reader, { imageBudget: 0 });
+  var doc = _pdfOpenDoc_(model.text, model.offsets);
+  var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
+  var result = _drivePdfComputeAnnotations_(doc, pages, issues,
+    started + Math.min(PDF_ANNOT_SEARCH_MS_WEB, Math.floor((budgetMs || DRIVE_ACTION_BUDGET_MS) / 2)));
+
+  var appended = pdfAnnotationUpdate_({
+    baseLength: fileSize,
+    endsWithNewline: reader.read(fileSize - 1, fileSize) === '\n',
+    prevXref: model.origStartxref,
+    trailerDict: model.origTrailer,
+    rootNum: model.rootNum,
+    pages: pages,
+    maxObjNum: model.maxNum,
+    readAnnotsArray: function(num) { return _pdfReadArrayObject_(model.text, model.offsets, num, doc); }
+  }, result.pageAnnotations);
+
+  // Der Anhang (wenige KB) wird bis zum Ende des Uploads als Temp-Datei geparkt.
+  var tmp = _tcFolder_('temp').createFile(Utilities.newBlob(
+    _pdfBinaryStringToBytes_(appended), 'application/octet-stream', '.authorcheck-temp-' + Utilities.getUuid() + '.bin'));
+
+  var total = fileSize + appended.length;
+  var outName = fileName.replace(/\.pdf$/i, '') + ' (annotated).pdf';
+  var init = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+    method: 'post', contentType: 'application/json; charset=UTF-8',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), 'X-Upload-Content-Type': 'application/pdf', 'X-Upload-Content-Length': String(total) },
+    payload: JSON.stringify({ name: outName, mimeType: 'application/pdf', parents: [_tcFolder_('pdfs').getId()] }),
+    muteHttpExceptions: true
+  });
+  if (init.getResponseCode() !== 200) throw new Error('Drive upload could not be started (HTTP ' + init.getResponseCode() + ').');
+  var hdrs = init.getHeaders();
+  var sessionUri = hdrs.Location || hdrs.location;
+  if (!sessionUri) throw new Error('Drive upload could not be started (no session).');
+
+  var state = { srcId: fileId, fileName: fileName, fileSize: fileSize, total: total, offset: 0,
+                session: sessionUri, tmpId: tmp.getId(), count: result.count, issuesTotal: result.total, positioned: result.positioned };
+  return _driveLargeAnnotatedContinue_(state, started, budgetMs);
+}
+
+/**
+ * Lädt weitere Stücke hoch, bis fertig oder das Zeitbudget der Aktion erreicht
+ * ist. Liefert { done: true, url } oder { done: false, state }.
+ */
+function _driveLargeAnnotatedContinue_(state, started, budgetMs) {
+  budgetMs = budgetMs || DRIVE_ACTION_BUDGET_MS;
+  var token = ScriptApp.getOAuthToken();
+  var srcUrl = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(state.srcId) + '?alt=media&supportsAllDrives=true';
+  var appended = null;
+
+  while (state.offset < state.total) {
+    if (Date.now() - started > budgetMs) return { done: false, state: state };
+    var end = Math.min(state.total, state.offset + DRIVE_UPLOAD_CHUNK);
+    var chunk = [];
+    if (state.offset < state.fileSize) {
+      var srcEnd = Math.min(end, state.fileSize);
+      var dl = UrlFetchApp.fetch(srcUrl, {
+        headers: { Authorization: 'Bearer ' + token, Range: 'bytes=' + state.offset + '-' + (srcEnd - 1) },
+        muteHttpExceptions: true
+      });
+      if (dl.getResponseCode() !== 206) throw new Error('Drive download failed (HTTP ' + dl.getResponseCode() + ').');
+      chunk = dl.getContent();
+      if (chunk.length !== srcEnd - state.offset) throw new Error('Drive download returned an unexpected length.');
+    }
+    if (end > state.fileSize) {
+      if (!appended) appended = DriveApp.getFileById(state.tmpId).getBlob().getBytes();
+      var from = Math.max(0, state.offset - state.fileSize);
+      chunk = Array.prototype.slice.call(chunk).concat(Array.prototype.slice.call(appended, from, end - state.fileSize));
+    }
+    var up = UrlFetchApp.fetch(state.session, {
+      method: 'put', contentType: 'application/pdf', payload: chunk,
+      headers: { 'Content-Range': 'bytes ' + state.offset + '-' + (end - 1) + '/' + state.total },
+      muteHttpExceptions: true
+    });
+    var code = up.getResponseCode();
+    if (code === 200 || code === 201) {
+      var fileId = JSON.parse(up.getContentText()).id;
+      _tcDeleteFile_(state.tmpId);
+      logAuditEvent_(getUserEmail_(), 'DRIVE_PDF_ANNOTATED', state.fileName + ' - ' + state.count + ' annotation(s), ' +
+        state.positioned + ' precisely positioned, ' + _driveMb_(state.total) + ' MB (streamed) -> ' + fileId);
+      return { done: true, url: 'https://drive.google.com/file/d/' + fileId + '/view', count: state.count, issuesTotal: state.issuesTotal };
+    }
+    if (code !== 308) throw new Error('Drive upload failed (HTTP ' + code + ').');
+    // Drive meldet, bis wohin es angekommen ist ("Range: bytes=0-N").
+    var h = up.getHeaders(), range = h.Range || h.range;
+    var rm = range ? /bytes=0-(\d+)/.exec(range) : null;
+    state.offset = rm ? parseInt(rm[1], 10) + 1 : end;
+  }
+  throw new Error('Drive upload ended without a file.');
+}
+
+function _buildDrivePdfAnnotateProgressCard_(state) {
+  var pct = Math.floor(state.offset / state.total * 100);
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader().setTitle('⏳ ' + _ct_('d.creatingAnnot')).setSubtitle(state.fileName));
+  var section = CardService.newCardSection();
+  section.addWidget(CardService.newTextParagraph().setText(
+    _ct_('d.annotLarge', { mb: _driveMb_(state.fileSize), pct: pct })));
+  section.addWidget(_cardButton_(true)
+    .setText('⏩ ' + _ct_('d.continue'))
+    .setOnClickAction(CardService.newAction()
+      .setFunctionName('apiExportDrivePdfAnnotatedContinue')
+      .setParameters({ state: JSON.stringify(state) })
+      .setLoadIndicator(CardService.LoadIndicator.SPINNER)));
+  card.addSection(section);
+  return card.build();
+}
+
+function _buildDrivePdfAnnotatedDoneCard_(fileName, url) {
+  var card = CardService.newCardBuilder();
+  card.setHeader(CardService.newCardHeader().setTitle('🎉 ' + _ct_('d.annotReady')).setSubtitle(fileName));
+  card.addSection(CardService.newCardSection().addWidget(_cardButton_(true)
+    .setText('🖍️ ' + _ct_('d.openAnnotated'))
+    .setOpenLink(CardService.newOpenLink().setUrl(url))));
+  return card.build();
+}
+
+/** Card-Action: setzt den Upload einer großen annotierten PDF fort. */
+function apiExportDrivePdfAnnotatedContinue(e) {
+  _driveRequireScopes_();
+  var started = Date.now();
+  try {
+    var state = JSON.parse(e.parameters.state);
+    var r = _driveLargeAnnotatedContinue_(state, started);
+    var nav = CardService.newNavigation().updateCard(r.done
+      ? _buildDrivePdfAnnotatedDoneCard_(state.fileName, r.url)
+      : _buildDrivePdfAnnotateProgressCard_(r.state));
+    return CardService.newActionResponseBuilder().setNavigation(nav).build();
+  } catch (err) {
+    Logger.log('apiExportDrivePdfAnnotatedContinue: ' + (err.message || err));
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(_ct_('d.annotContinueFailed', { msg: err.message || err })))
+      .build();
+  }
+}
+
+/**
+ * Platziert das Sticky-Note-Icon im Seitenrand auf Höhe der ersten markierten
+ * Zeile (im breiteren Rand neben dem Textblock), damit es keinen Text
+ * verdeckt. Ist die Stelle schon durch ein anderes Icon belegt, wird der
+ * gegenüberliegende Rand genommen, danach schrittweise tiefer.
+ */
+function _pdfPlaceNoteIcon_(mediaBox, model, lineBox, placed) {
+  var size = 20, gap = 4, edge = 2;
+  var yMid = (lineBox[1] + lineBox[3]) / 2;
+  var y = Math.min(mediaBox[3] - size - edge, Math.max(mediaBox[1] + edge, yMid - size / 2));
+  var leftX = Math.max(mediaBox[0] + edge, model.textLeft - size - gap);
+  var rightX = Math.min(mediaBox[2] - size - edge, model.textRight + gap);
+  // Linker Rand bevorzugt; ist er zu schmal (oder schon belegt), der rechte.
+  var columns = (model.textLeft - mediaBox[0] >= mediaBox[2] - model.textRight) ? [leftX, rightX] : [rightX, leftX];
+
+  function overlaps(r) {
+    return placed.some(function(o) { return r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]; });
+  }
+  var rect = null;
+  // Beide Ränder auf Zeilenhöhe probieren, danach schrittweise tiefer.
+  for (var row = 0; row < 20 && !rect; row++) {
+    var ry = Math.max(mediaBox[1] + edge, y - row * (size + 2));
+    for (var c = 0; c < columns.length && !rect; c++) {
+      var cand = [columns[c], ry, columns[c] + size, ry + size];
+      if (!overlaps(cand)) rect = cand;
+    }
+  }
+  if (!rect) rect = [columns[0], y, columns[0] + size, y + size];
+  placed.push(rect);
+  return rect;
+}
+
+/**
+ * Erstellt den Audit-Report für eine geprüfte PDF-Datei als Google Sheet
+ * (inklusive Location-Spalte, da im PDF nichts automatisch ersetzt werden kann)
+ * und gibt die URL zurück.
+ */
+function _buildDrivePdfReportSheet_(issues, fileName, language) {
+  var title = "AuthorCheck_PDF_" + fileName.replace(/\.pdf$/i, '').slice(0, 60) + "_" + new Date().toISOString().slice(0, 10);
+  var ss = SpreadsheetApp.create(title);
+  _tcMoveToFolder_(ss.getId(), 'pdfs');
+  var sheet = ss.getActiveSheet();
+  sheet.setName("PDF Audit Report");
+
+  var headers = ["Type", "Location", "Original Passage", "Suggestion", "Explanation"];
+  var rows = [headers];
+
+  if (!issues.length) {
+    rows.push(["-", "-", "No errors found.", "-", "-"]);
+  } else {
+    issues.forEach(function(issue) {
+      rows.push([
+        (issue.type === "prompt" && issue.rule ? "PROMPT: " + issue.rule : (issue.type || "style").toUpperCase()),
+        issue.location || "",
+        issue.original || "",
+        issue.suggestion || "",
+        issue.explanation || ""
+      ]);
+    });
+  }
+
+  rows = _sheetSafeRows_(rows);
+  var numRows = rows.length;
+  var numCols = headers.length;
+  var range = sheet.getRange(1, 1, numRows, numCols);
+  range.setValues(rows);
+
+  sheet.getRange(1, 1, 1, numCols)
+    .setFontWeight("bold")
+    .setBackground("#FFED00")
+    .setFontColor("#3A3A3A");
+  sheet.setFrozenRows(1);
+  range.setVerticalAlignment("top")
+    .setBorder(true, true, true, true, true, true, "#DDDDDD", SpreadsheetApp.BorderStyle.SOLID);
+  sheet.getRange(2, numCols, numRows - 1, 1).setWrap(true);
+  sheet.autoResizeColumns(1, numCols - 1);
+  sheet.setColumnWidth(numCols, 350);
+
+  return ss.getUrl();
+}

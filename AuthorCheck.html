@@ -1,0 +1,1794 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --yellow: #FFED00;
+  --yellow-dim: #E6D500;
+  --ink: #3A3A3A;
+  --white: #FFFFFF;
+  --gray-50: #FAFAFA;
+  --gray-100: #F2F2F2;
+  --gray-150: #E9E9E9;
+  --gray-200: #DDDDDD;
+  --gray-300: #C4C4C4;
+  --gray-400: #9A9A9A;
+  --gray-500: #767676;
+  --gray-600: #565656;
+  --red: #D32F2F;
+  --green: #4CAF50;
+  --ff-head: "Oswald", "Arial Narrow", sans-serif;
+  --ff-body: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --ease: cubic-bezier(.16,1,.3,1);
+}
+*, *::before, *::after{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ background:var(--white); color:var(--ink); font-family:var(--ff-body); font-size:17px; -webkit-font-smoothing:antialiased; overflow-x:hidden; }
+button, select, input, textarea{ font-family:inherit; }
+#app{ padding:20px; }
+.header{ margin-bottom:16px; flex-wrap:wrap; }
+.header-text{ flex:1 1 160px; min-width:0; }
+.header h1{ font-family:var(--ff-head); font-size:20px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--ink); }
+.header p{ font-size:14px; color:var(--gray-500); margin-top:4px; line-height:1.4; }
+
+/* Responsive Header Buttons */
+.header-nav { display:flex; align-items:center; gap:4px; flex-shrink:0; }
+.header-btn {
+  display:flex; align-items:center; justify-content:center; gap:4px;
+  background:var(--gray-50); border:1px solid var(--gray-300);
+  padding:5px 7px; cursor:pointer; color:var(--gray-600);
+  font-family:var(--ff-head); font-size:11px; font-weight:600; text-transform:uppercase;
+  white-space:nowrap; transition:all .15s;
+}
+.header-btn:hover { background:var(--gray-100); border-color:var(--ink); color:var(--ink); }
+.header-btn svg { width:14px; height:14px; flex-shrink:0; }
+
+/* Spezielle Anpassungen für die schmale Seitenleiste (Sidebar) */
+@media (max-width: 450px) {
+  html, body { font-size: 15px; } /* Schriftart um 2 Punkte kleiner */
+  .header h1 { font-size: 18px; }
+  .header p { font-size: 13px; }
+  .control-row label { font-size: 13px; }
+  #lang-select { font-size: 15px; }
+  .btn-check { font-size: 15px; padding: 12px; }
+  .summary-bar { font-size: 13px; }
+  .btn-bulk { font-size: 12px; padding: 5px 8px; }
+  .type-badge { font-size: 11px; }
+  .diff-line { font-size: 15px; }
+  .issue-explanation { font-size: 13.5px; }
+  .btn-mini { font-size: 12px; padding: 6px 8px; }
+  
+  /* Header-Buttons kompakt halten */
+  .header-btn span { display: none; }
+  .header-btn { padding: 6px; }
+
+  /* Schmale Seitenleiste: Sprache/Home/Regeln als eigene Zeile oben rechts,
+     Titel und Beschreibung darunter in voller Breite (statt zusammengequetscht). */
+  #app { padding: 14px; }
+  .header-nav { order: -1; margin-left: auto; }
+  .header-text { flex-basis: 100%; }
+}
+.control-row{ display:flex; gap:12px; margin-bottom:14px; min-width:0; }
+.control-row label{ display:flex; align-items:center; font-family:var(--ff-head); font-size:15px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--gray-500); white-space:nowrap; }
+#lang-select{
+  flex:1 1 0; min-width:0; width:100%; border:1.5px solid var(--gray-300); background:var(--white);
+  padding:10px 12px; font-size:17px; color:var(--ink); cursor:pointer; outline:none;
+}
+#lang-select:focus{ border-color:var(--ink); }
+.btn-check{
+  width:100%; display:flex; align-items:center; justify-content:center; gap:10px;
+  background:var(--yellow); color:var(--ink); border:none; cursor:pointer;
+  padding:14px; font-family:var(--ff-head); font-size:17px; font-weight:600;
+  letter-spacing:.8px; text-transform:uppercase; transition:background .15s;
+  margin-bottom:16px;
+}
+.btn-check:hover{ background:var(--yellow-dim); }
+.btn-check:disabled{ opacity:.5; cursor:not-allowed; }
+.btn-check svg{ width:20px; height:20px; }
+.ai-disabled-note{ text-align:center; padding:40px 14px; color:var(--gray-400); font-size:16px; line-height:1.5; }
+.summary-bar{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  font-family:var(--ff-head); font-size:15px; font-weight:600; letter-spacing:.6px;
+  text-transform:uppercase; color:var(--gray-500);
+  padding:10px 0; border-bottom:1px solid var(--gray-150); margin-bottom:14px; flex-wrap:wrap;
+}
+.summary-bar b{ color:var(--ink); }
+.bulk-actions{ 
+  display: flex; 
+  flex-wrap: wrap; 
+  gap: 4px; 
+  width: 100%;
+}
+.btn-bulk{
+  flex: 1 1 calc(50% - 4px); /* Ordnet die 4 Buttons sauber in 2 Zeilen ? 2 Buttons an */
+  background:var(--white); 
+  border:1.5px solid var(--ink); 
+  padding:5px 4px; 
+  cursor:pointer;
+  font-family:var(--ff-head); 
+  font-size:11px; 
+  font-weight:600; 
+  letter-spacing:.3px; 
+  text-transform:uppercase; 
+  color:var(--ink);
+  text-align: center;
+  white-space: nowrap;
+}
+.btn-bulk:hover{ background:var(--ink); color:var(--yellow); }
+.btn-bulk:disabled{ opacity:.4; cursor:not-allowed; }
+/* Filter nach Kategorie (Terminologie, Stil, Grammatik, eigene Prompts) */
+.issue-filters{ display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin:-6px 0 12px; }
+.filter-chip{
+  background:var(--white); border:1px solid var(--gray-300); color:var(--gray-600); cursor:pointer;
+  font-family:var(--ff-head); font-size:11px; font-weight:600; letter-spacing:.3px; text-transform:uppercase;
+  padding:3px 8px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.filter-chip .chip-count{ opacity:.6; margin-left:4px; }
+.filter-chip:hover{ border-color:var(--ink); color:var(--ink); }
+.filter-chip.active{ background:var(--ink); border-color:var(--ink); color:var(--yellow); }
+.group-toggle{ margin-left:auto; display:flex; align-items:center; gap:4px; font-size:11px; color:var(--gray-500); cursor:pointer; white-space:nowrap; }
+.group-head{
+  font-family:var(--ff-head); font-size:12px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+  color:var(--gray-500); margin:14px 0 6px; padding-bottom:3px; border-bottom:1px solid var(--gray-150);
+}
+.group-head:first-child{ margin-top:0; }
+.loading-state{ display:flex; flex-direction:column; align-items:center; justify-content:center; padding:50px 14px; }
+.loading-text{ font-family:var(--ff-head); font-size:16px; font-weight:600; letter-spacing:.4px; color:var(--gray-500); text-align:center; }
+.issue-card{
+  border:1px solid var(--gray-200); margin-bottom:12px; background:var(--white);
+  opacity:0; transform:translateY(6px); animation:cardIn .3s var(--ease) forwards;
+}
+@keyframes cardIn{ to{ opacity:1; transform:none; } }
+.issue-head{ display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--gray-50); border-bottom:1px solid var(--gray-150); }
+.type-badge{
+  font-family:var(--ff-head); font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+  padding:3px 9px; flex-shrink:0;
+}
+/* Lange Regelnamen eigener Prompts sprengten die Karte (horizontaler Scrollbalken). */
+.type-badge.prompt{ flex-shrink:1; min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.issue-card{ min-width:0; overflow:hidden; }
+.issue-head{ min-width:0; }
+.issue-card.prompt .diff-line{ font-size:15px; }
+.issue-actions .btn-mini{ flex:1 1 70px; min-width:0; }
+.type-badge.terminology{ background:var(--yellow); color:var(--ink); }
+.type-badge.grammar{ background:var(--gray-200); color:var(--gray-600); }
+.type-badge.style { background:var(--ink); color:var(--yellow); }
+.type-badge.prompt { background:#fff; color:var(--ink); border:1px solid var(--ink); }
+.issue-location { font-size:11px; color:var(--gray-500); margin-left:6px; }
+.issue-dismiss{ margin-left:auto; background:none; border:none; cursor:pointer; color:var(--gray-400); padding:4px; display:flex; }
+.issue-dismiss:hover{ color:var(--red); }
+.issue-dismiss svg{ width:18px; height:18px; }
+.issue-body{ padding:14px; }
+.diff-line{ font-size:18px; line-height:1.5; margin-bottom:8px; word-break:break-word; }
+.diff-original{ color:var(--red); text-decoration:line-through; text-decoration-thickness:1.5px; }
+.diff-arrow{ color:var(--gray-400); margin:0 6px; }
+.diff-suggestion{ color:var(--ink); font-weight:600; }
+.issue-explanation{ font-size:15.5px; color:var(--gray-500); line-height:1.5; margin-bottom:12px; }
+.issue-actions{ display:flex; flex-wrap:wrap; gap:8px; }
+.btn-mini{
+  flex: 1 1 calc(25% - 8px);
+  min-width: 110px;
+  display:flex; align-items:center; justify-content:center; gap:6px;
+  border:1.5px solid var(--gray-300); background:var(--white); cursor:pointer;
+  padding:8px 12px; font-family:var(--ff-head); font-size:14px; font-weight:600;
+  letter-spacing:.5px; text-transform:uppercase; color:var(--ink); transition:all .15s;
+}
+.btn-mini svg{ width:11px; height:11px; }
+.btn-mini.primary{ background:var(--yellow); border-color:var(--yellow); }
+.btn-mini.primary:hover{ background:var(--yellow-dim); }
+.btn-mini.ghost:hover{ border-color:var(--ink); }
+.btn-mini:disabled{ opacity:.5; cursor:not-allowed; }
+/* Nur Text ausgrauen - der Button "Nächstes ersetzen" (.btn-next) muss klickbar bleiben */
+.issue-card.applied .diff-line, .issue-card.applied .issue-explanation{ opacity:.5; }
+.issue-card.applied .btn-mini:not(.btn-next){ pointer-events:none; }
+.applied-tag{ font-family:var(--ff-head); font-size:12px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:var(--green); display:flex; align-items:center; gap:4px; }
+.applied-tag svg{ width:12px; height:12px; }
+.state-box{ text-align:center; padding:34px 14px; }
+.state-icon-wrap{ display:flex; justify-content:center; margin-bottom:10px; }
+.state-icon-wrap svg{ width:36px; height:36px; }
+.state-title{ font-family:var(--ff-head); font-size:15px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--ink); margin-bottom:6px; }
+.state-sub{ font-size:14px; color:var(--gray-500); line-height:1.5; }
+.state-box .btn-mini{ margin:14px auto 0; max-width:200px; }
+#toast{
+  position:fixed; left:50%; bottom:20px; transform:translateX(-50%) translateY(10px);
+  background:var(--ink); color:var(--yellow); font-family:var(--ff-head);
+  font-size:13px; font-weight:600; letter-spacing:.6px; text-transform:uppercase;
+  padding:10px 18px; opacity:0; pointer-events:none; transition:opacity .2s var(--ease), transform .2s var(--ease); 
+  z-index:10000; max-width:90%; text-align:center; box-shadow:0 4px 15px rgba(0,0,0,0.3); border:1px solid var(--yellow);
+}
+#toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+#toast.has-link{ pointer-events:auto; }
+#toast a{ color:var(--yellow); margin-left:8px; text-decoration:underline; }
+/* Regel-Popup: Seitenleisten-Bereich gar nicht erst anzeigen (kein Aufblitzen) */
+body.rules-only #app{ display:none; }
+/* Im Popup füllt das Regelfenster den ganzen Dialog (kein grauer Rahmen) */
+body.rules-only .modal-bg{ padding:0; background:var(--white); }
+body.rules-only .modal{ height:100vh; max-height:none; border:none; box-shadow:none; }
+.gem-row{ display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+.gem-row .btn-mini{ flex:1 1 220px; text-decoration:none; display:flex; align-items:center; justify-content:center; gap:6px; }
+.ctx-loading{ display:flex; justify-content:center; padding:40px 0; }
+/* Settings Gear & Modal */
+#settingsGear {
+  position:absolute; top:12px; right:14px; background:none; border:none; cursor:pointer; color:var(--gray-400); padding:4px;
+}
+#settingsGear:hover { color:var(--ink); }
+#settingsGear svg { width:18px; height:18px; }
+.modal-bg { display:none; position:fixed; inset:0; background:rgba(58,58,58,.5); z-index:200; padding:15px; }
+.modal-bg.open { display:flex; flex-direction:column; justify-content:center; }
+.modal { background:var(--white); border:1px solid var(--gray-200); max-height:90vh; display:flex; flex-direction:column; box-shadow:0 10px 25px rgba(0,0,0,0.1); }
+.modal-head { display:flex; align-items:center; justify-content:space-between; padding:14px; border-bottom:1px solid var(--gray-150); }
+.modal-head h2 { font-family:var(--ff-head); font-size:14px; text-transform:uppercase; letter-spacing:.5px; }
+.modal-close { background:none; border:none; cursor:pointer; padding:4px; color:var(--gray-500); }
+.modal-body { padding:14px; overflow-y:auto; flex:1; }
+.modal-foot { padding:10px 14px; border-top:1px solid var(--gray-150); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+.rule-group { margin-bottom: 12px; border: 1px solid var(--gray-200); background: var(--white); }
+.rule-group-header { display: flex; justify-content: space-between; align-items: center; background: var(--gray-50); padding: 10px 12px; cursor: pointer; user-select: none; }
+.rule-group-header h3 { font-family:var(--ff-head); font-size:12px; color:var(--ink); text-transform:uppercase; margin:0; }
+.rule-group-chevron { color: var(--gray-400); transition: transform 0.2s var(--ease); display: flex; align-items: center; }
+.rule-group-chevron svg { width: 14px; height: 14px; }
+.rule-group.expanded .rule-group-chevron { transform: rotate(180deg); }
+.rule-group-body { display: none; padding: 10px 12px; border-top: 1px solid var(--gray-150); }
+.rule-group.expanded .rule-group-body { display: block; }
+.rule-subgroup { margin-bottom: 8px; border: 1px solid var(--gray-150); background: var(--white); }
+.rule-subgroup-header { display: flex; justify-content: space-between; align-items: center; background: var(--gray-100); padding: 7px 10px; cursor: pointer; user-select: none; }
+.rule-subgroup-header h4 { font-family:var(--ff-head); font-size:11px; color:var(--gray-600); text-transform:uppercase; margin:0; }
+.rule-subgroup-chevron { color: var(--gray-400); transition: transform 0.2s var(--ease); display: flex; align-items: center; }
+.rule-subgroup.expanded .rule-subgroup-chevron { transform: rotate(180deg); }
+.rule-subgroup-body { display: none; padding: 8px; }
+.rule-subgroup.expanded .rule-subgroup-body { display: block; }
+body.popup-mode .rule-subgroup-header h4 { font-size: 14px; }
+.rule-item { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; margin-bottom:8px; padding:6px; background:var(--gray-50); border:1px solid var(--gray-150); }
+/* Aufklappbare Details je Regel: ID, Hinweis, Regeltext/Prompt bearbeiten */
+.btn-expand { background:none; border:none; cursor:pointer; color:var(--gray-400); padding:3px; margin-left:6px; flex-shrink:0; display:flex; transition:transform .15s; }
+.btn-expand:hover { color:var(--ink); }
+.rule-item.open .btn-expand { transform:rotate(180deg); color:var(--ink); }
+.rule-details { display:none; flex-basis:100%; margin-top:6px; padding-top:6px; border-top:1px dashed var(--gray-200); font-size:11px; color:var(--gray-600); }
+.rule-item.open .rule-details { display:block; }
+.rule-details .rd-meta { color:var(--gray-500); margin-bottom:6px; line-height:1.5; }
+.rule-details .rd-meta code { background:var(--white); border:1px solid var(--gray-200); padding:0 4px; }
+.rule-details label.rd-label { display:block; font-size:10px; font-weight:bold; text-transform:uppercase; color:var(--gray-500); margin:6px 0 2px; cursor:default; }
+.rule-details textarea, .rule-details input[type="text"] { width:100%; box-sizing:border-box; padding:5px; font-size:11px; font-family:inherit; border:1px solid var(--gray-300); background:var(--white); resize:vertical; }
+.rule-details textarea.rd-prompt { min-height:120px; font-family:monospace; line-height:1.4; }
+.rule-details .rd-hint { font-size:10px; color:var(--gray-400); margin-top:2px; }
+.rule-details .rd-row { display:flex; gap:6px; align-items:center; margin-top:6px; }
+.edited-tag { font-family:var(--ff-head); font-size:10px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; background:var(--gray-200); color:var(--gray-600); padding:0 5px; margin-left:6px; white-space:nowrap; }
+body.popup-mode .rule-details { font-size:13px; }
+body.popup-mode .rule-details textarea, body.popup-mode .rule-details input[type="text"] { font-size:13px; }
+.rule-item label { font-size:11px; color:var(--gray-600); display:flex; align-items:center; gap:8px; cursor:pointer; flex:1; }
+.rule-item input[type="checkbox"] { cursor:pointer; }
+.rule-item select { font-size:11px; padding:2px 4px; border:1px solid var(--gray-300); background:var(--white); margin-left:10px;}
+.btn-move { background:none; border:none; cursor:pointer; color:var(--gray-400); padding:3px; margin-left:6px; flex-shrink:0; display:flex; }
+.btn-move:hover { color:var(--ink); }
+.btn-del { background:none; border:none; cursor:pointer; color:var(--gray-400); padding:3px; margin-left:6px; flex-shrink:0; display:flex; }
+.btn-del:hover { color:var(--red); }
+body.popup-mode .btn-del svg { width:15px; height:15px; }
+.rule-group-header .btn-del { margin-left:auto; margin-right:8px; }
+.std-tag { font-family:var(--ff-head); font-size:10px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; border:1px solid var(--gray-300); color:var(--gray-500); padding:0 5px; margin-left:6px; white-space:nowrap; }
+.custom-tag { font-family:var(--ff-head); font-size:10px; font-weight:700; letter-spacing:.4px; text-transform:uppercase; background:var(--yellow); color:var(--ink); padding:1px 6px; margin-left:8px; }
+.btn-mini.danger:hover { border-color:var(--red); color:var(--red); }
+body.popup-mode .btn-move svg { width:15px; height:15px; }
+.move-dialog-overlay { display:none; position:absolute; inset:0; background:rgba(58,58,58,.55); z-index:260; align-items:center; justify-content:center; padding:20px; }
+.move-dialog-overlay.open { display:flex; }
+.move-dialog-box { background:var(--white); max-width:420px; width:100%; padding:20px; box-shadow:0 10px 25px rgba(0,0,0,.2); }
+.move-dialog-box h3 { font-family:var(--ff-head); font-size:14px; text-transform:uppercase; margin-bottom:14px; }
+.move-dialog-box label { display:block; font-size:10.5px; font-weight:bold; color:var(--gray-500); text-transform:uppercase; margin-bottom:4px; }
+.move-dialog-box select, .move-dialog-box input { width:100%; padding:8px; font-size:13px; border:1px solid var(--gray-300); margin-bottom:12px; }
+.move-dialog-box .move-dialog-actions { display:flex; gap:8px; justify-content:flex-end; }
+body.popup-mode .move-dialog-box label { font-size:13px; }
+body.popup-mode .move-dialog-box select, body.popup-mode .move-dialog-box input { font-size:15px; padding:10px; }
+
+.spinner {
+  display:inline-block; width:14px; height:14px; border:2px solid var(--gray-300);
+  border-top-color:var(--ink); border-radius:50%; animation:spin .7s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.modal-help-btn { background:none; border:none; cursor:pointer; padding:6px; color:var(--gray-600); display:flex; align-items:center; justify-content:center; }
+.modal-help-btn:hover { color:var(--ink); }
+.help-overlay { display:none; position:absolute; inset:0; background:rgba(58,58,58,.55); z-index:250; align-items:center; justify-content:center; padding:20px; }
+.help-overlay.open { display:flex; }
+.help-box { background:var(--white); max-width:480px; width:100%; padding:22px; box-shadow:0 10px 25px rgba(0,0,0,.2); }
+.help-box h3 { font-family:var(--ff-head); font-size:16px; text-transform:uppercase; margin-bottom:12px; }
+.help-list { list-style:disc; padding-left:18px; margin-bottom:14px; }
+.help-list li { font-size:14px; line-height:1.5; margin-bottom:6px; color:var(--gray-600); }
+.help-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--gray-600); cursor:pointer; }
+
+/* Popup (Rules & Custom Prompts): Schrift insgesamt größer als in der Seitenleiste */
+body.popup-mode { font-size: 21px; }
+body.popup-mode .modal-head h2 { font-size: 18px; }
+body.popup-mode .rule-group-header h3 { font-size: 16px; }
+body.popup-mode .rule-item label { font-size: 15px; }
+body.popup-mode .rule-item select { font-size: 15px; }
+body.popup-mode .btn-mini { font-size: 16px; }
+body.popup-mode #newRuleGroupSelect,
+body.popup-mode #newRuleCustomGroup,
+body.popup-mode #newRuleKind,
+body.popup-mode #newRuleScope,
+body.popup-mode #newRuleName,
+body.popup-mode #newRuleDesc {
+  font-size: 15px !important;
+  padding: 10px !important;
+}
+body.popup-mode #newRulePrompt {
+  font-size: 15px !important;
+  height: 110px !important;
+}
+.modal-foot .btn-mini { white-space: nowrap; flex: 0 0 auto; padding: 8px 14px; }
+body.popup-mode .modal-foot .btn-mini { font-size: 14px; padding: 8px 12px; }
+body.popup-mode .modal-foot .btn-check { font-size: 15px; }
+.scope-tag { font-family:var(--ff-head); font-size:10px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; border:1px solid var(--gray-300); background:#fff; color:var(--gray-500); padding:0 5px; margin-left:6px; white-space:nowrap; cursor:pointer; }
+.scope-tag.doc { background:var(--yellow); border-color:var(--yellow); color:var(--ink); }
+.scope-help { font-size:10px; color:var(--gray-500); margin:-2px 0 6px; line-height:1.4; }
+body.popup-mode .scope-help { font-size:13px; }
+.check-notice a.btn-mini { display:inline-block; margin-top:6px; text-decoration:none; }
+.check-notice{margin:0 0 10px;padding:8px 10px;background:#FFF8D6;border-left:3px solid var(--yellow);font-size:13px;line-height:1.45;color:#3A3A3A;}
+.remaining-hint{font-size:13px;color:#767676;margin:0 6px;}
+.failed-tag{font-size:13px;color:#D32F2F;margin-right:6px;}
+.status-note{font-size:13px;color:var(--gray-400);}
+.control-row .scope-option{ cursor:pointer; font-family:var(--ff-body); font-size:14px; font-weight:normal; letter-spacing:0; text-transform:none; color:var(--ink); }
+.rules-hint{ font-size:13px; color:var(--gray-500); text-align:center; margin:-8px 0 16px; }
+/* Gleicher Button-Stil wie die Auswahl Terminologiesuche / Author Check (HomeChooser.html). */
+.choice-btn{
+  width:100%; display:flex; align-items:center; gap:14px;
+  background:var(--white); border:1.5px solid var(--ink); cursor:pointer; color:var(--ink);
+  padding:14px 16px; margin:-4px 0 16px; text-align:left; transition:all .15s;
+}
+.choice-btn:hover{ background:var(--yellow); }
+.choice-btn svg{ width:24px; height:24px; flex-shrink:0; }
+.choice-title{ font-family:var(--ff-head); font-size:15px; font-weight:600; text-transform:uppercase; letter-spacing:.4px; }
+.choice-sub{ font-size:12.5px; color:var(--gray-500); margin-top:2px; line-height:1.35; }
+.ui-lang-select{ border:1px solid var(--gray-200); background:var(--white); color:var(--gray-600); padding:4px; font-size:11px; cursor:pointer; outline:none; max-width:96px; }
+.ui-lang-select:hover, .ui-lang-select:focus{ border-color:var(--ink); color:var(--ink); }
+body.popup-mode .ui-lang-select{ font-size:13px; max-width:none; }
+</style>
+</head>
+<body class="<?= rulesOnly ? 'popup-mode rules-only' : '' ?>">
+<div id="app">
+  <div class="header" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+    <div class="header-text">
+      <h1 data-i18n="ac.title">Author Check</h1>
+      <p data-i18n="ac.subtitle">Check active text for grammar, terminology, and custom style rules.</p>
+    </div>
+    <div class="header-nav">
+      <select class="ui-lang-select" data-i18n-title="ui.language" title="Interface language" aria-label="Interface language"></select>
+      <button class="header-btn" onclick="backToHomepage()" data-i18n-title="ac.homeTitle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+        </svg>
+        <span data-i18n="ac.home">Home</span>
+      </button>
+
+      <button class="header-btn" id="rulesBtn" onclick="openRulesSettings()" data-i18n-title="ac.rulesTitle">
+        <svg id="rulesBtnIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        <span class="spinner" id="rulesBtnSpinner" style="display:none;"></span>
+        <span data-i18n="ac.rules">Rules</span>
+      </button>
+    </div>
+  </div>
+  <div id="ctxLoading" class="ctx-loading"><span class="spinner"></span></div>
+  <div id="ctxError" style="display:none"></div>
+  <div id="aiUnavailable" class="ai-disabled-note" style="display:none" data-i18n="ac.unavailable">Author Check is not configured yet (Gemini API Key missing). Please contact an admin.</div>
+  <div id="mainWrap" style="display:none">
+    <div class="control-row" style="margin-bottom:8px;">
+      <label style="margin-right:10px;" data-i18n="ac.scope">Scope</label>
+      <div style="display:flex; gap:4px 12px; align-items:center; flex-wrap:wrap;">
+        <label class="scope-option">
+          <input type="radio" name="checkScope" value="full" checked style="margin-right:4px;"> <span data-i18n="ac.scopeFull">Entire Document</span>
+        </label>
+        <label class="scope-option">
+          <input type="radio" name="checkScope" value="selection" style="margin-right:4px;"> <span data-i18n="ac.scopeSelection">Selection Only</span>
+        </label>
+      </div>
+    </div>
+    <div class="control-row">
+      <label data-i18n="ac.language">Language</label>
+      <select id="lang-select" class="content-lang-select">
+        <option value="de" selected>German</option>
+        <option value="en">English</option>
+        <option value="es">Spanish</option>
+        <option value="sv">Swedish</option>
+        <option value="pt">Portuguese</option>
+        <option value="ru">Russian</option>
+        <option value="it">Italian</option>
+        <option value="fr">French</option>
+        <option value="nl">Dutch</option>
+        <option value="hu">Hungarian</option>
+        <option value="sk">Slovak</option>
+        <option value="hr">Croatian</option>
+        <option value="tr">Turkish</option>
+        <option value="pl">Polish</option>
+        <option value="fi">Finnish</option>
+        <option value="sr">Serbian</option>
+        <option value="ar">Arabic</option>
+        <option value="bg">Bulgarian</option>
+        <option value="el">Greek</option>
+        <option value="ko">Korean</option>
+        <option value="da">Danish</option>
+        <option value="ja">Japanese</option>
+        <option value="vi">Vietnamese</option>
+        <option value="zh">Chinese</option>
+        <option value="lv">Latvian</option>
+        <option value="cs">Czech</option>
+        <option value="uk">Ukrainian</option>
+        <option value="ro">Romanian</option>
+        <option value="et">Estonian</option>
+        <option value="sl">Slovenian</option>
+        <option value="nb">Norwegian</option>
+      </select>
+    </div>
+    <button class="btn-check" id="checkBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+      <span data-i18n="ac.checkBtn">Check Document</span>
+    </button>
+    <button type="button" class="choice-btn" onclick="openRulesSettings()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg>
+      <div>
+        <div class="choice-title" data-i18n="ac.rulesTitle">Rules &amp; Custom Prompts</div>
+        <div class="choice-sub" data-i18n="ac.rulesBtnSub">View and change which rules and prompts apply</div>
+      </div>
+    </button>
+    <div id="resultsWrap" aria-live="polite"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="rulesModal">
+  <div class="modal">
+    <div class="modal-head" style="display:flex; justify-content:space-between; align-items:center; padding:14px; border-bottom:1px solid var(--gray-150);">
+      <h2 data-i18n="ac.rulesTitle">Rules & Custom Prompts</h2>
+      <div style="display:flex; align-items:center; gap:2px;">
+        <select class="ui-lang-select" data-i18n-title="ui.language" title="Interface language" aria-label="Interface language" style="margin-right:6px;"></select>
+        <button class="modal-help-btn" onclick="openRulesHelp()" data-i18n-title="ac.helpTitle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/>
+            <circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+        <button class="modal-close" onclick="closeRulesSettings()" data-i18n-title="ac.close" style="background:none; border:none; cursor:pointer; padding:6px; color:var(--gray-600); display:flex; align-items:center; justify-content:center;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="20" height="20"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="modal-body" id="rulesModalBody">
+      <div style="margin-bottom:12px; padding:10px 12px; background:var(--gray-50); border:1px solid var(--gray-200); font-size:12px; color:var(--gray-600); line-height:1.5;">
+        <span data-i18n="ac.personalNote">These settings are personal to you and are applied automatically across all Docs, Sheets, and Slides. They are not tied to a single document or format.</span>
+      </div>
+      <div class="control-row" style="margin-bottom:12px;">
+        <label style="margin-right:10px;" data-i18n="ac.ruleLanguage">Rule Language</label>
+        <select id="rulesLangSelect" class="content-lang-select" onchange="onRulesLangChange()" style="flex:1; padding:6px 8px; font-size:13px; border:1.5px solid var(--gray-300);">
+          <option value="de" selected>German</option>
+          <option value="en">English</option>
+          <option value="fr">French</option>
+          <option value="es">Spanish</option>
+          <option value="it">Italian</option>
+          <option value="pt">Portuguese</option>
+          <option value="zh">Chinese</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="ru">Russian</option>
+          <option value="tr">Turkish</option>
+          <option value="fi">Finnish</option>
+          <option value="no">Norwegian</option>
+          <option value="sv">Swedish</option>
+          <option value="el">Greek</option>
+        </select>
+      </div>
+      <div class="control-row" style="margin-bottom:8px;">
+        <input type="text" id="rulesSearchInput" data-i18n-placeholder="ac.searchRules" oninput="filterRulesList()" style="flex:1; padding:8px 10px; font-size:13px; border:1.5px solid var(--gray-300);">
+      </div>
+      <div id="rulesListContainer">
+        <div class="loading-state"><div class="loading-text" data-i18n="ac.loadingRules">Loading rules...</div></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <div style="display:flex; gap:6px;">
+        <button class="btn-mini ghost" style="padding:6px 10px;" onclick="exportRulesOverview()" data-i18n-title="ac.overviewTitle"><span data-i18n="ac.overview">Overview (Sheet)</span></button>
+        <button class="btn-mini ghost" id="exportAllToLogBtn" style="padding:6px 10px; display:none;" onclick="exportAllRulesToLogSheet()" data-i18n-title="ac.exportAllLogTitle"><span data-i18n="ac.exportAllLog">Export All to Log</span></button>
+        <button class="btn-mini ghost" style="padding:6px 10px;" onclick="exportRulesToDrive()" data-i18n-title="ac.jsonExportTitle"><span data-i18n="ac.jsonExport">JSON Export</span></button>
+        <button class="btn-mini ghost danger" style="padding:6px 10px;" onclick="restoreDefaultRules()" data-i18n-title="ac.restoreDefaultsTitle"><span data-i18n="ac.restoreDefaults">Restore defaults</span></button>
+        <label class="btn-mini ghost" style="padding:6px 10px; cursor:pointer;" data-i18n-title="ac.jsonImportTitle">
+          <span data-i18n="ac.jsonImport">JSON Import</span>
+          <input type="file" id="importRulesInput" accept=".json,application/json" style="display:none" onchange="importRulesFile(event)">
+        </label>
+      </div>
+      <button class="btn-check" style="margin:0; padding:8px 16px; width:auto;" onclick="saveRulesSettings()" data-i18n="ac.save">Save Settings</button>
+    </div>
+
+    <div class="move-dialog-overlay" id="moveRuleOverlay">
+      <div class="move-dialog-box">
+        <h3 data-i18n="ac.moveTitle">Move Rule</h3>
+        <label data-i18n="ac.section">Section</label>
+        <select id="moveRuleSectionSelect" onchange="onMoveSectionChange()"></select>
+        <input type="text" id="moveRuleSectionCustom" data-i18n-placeholder="ac.newSectionPh" style="display:none;">
+        <label data-i18n="ac.subsection">Subsection</label>
+        <select id="moveRuleSubsectionSelect" onchange="onMoveSubsectionChange()"></select>
+        <input type="text" id="moveRuleSubsectionCustom" data-i18n-placeholder="ac.newSubsectionPh" style="display:none;">
+        <div class="move-dialog-actions">
+          <button class="btn-mini ghost" onclick="closeMoveRuleDialog()" data-i18n="ac.cancel">Cancel</button>
+          <button class="btn-mini primary" onclick="confirmMoveRule()" data-i18n="ac.move">Move</button>
+        </div>
+      </div>
+    </div>
+    <div class="help-overlay" id="rulesHelpOverlay">
+      <div class="help-box" style="max-width:640px; max-height:80vh; overflow-y:auto;">
+        <div data-i18n-html="ac.help.html"></div>
+        <label class="help-checkbox">
+          <input type="checkbox" id="rulesHelpDontShow">
+          <span data-i18n="ac.help.dontShow">Don't show this automatically next time</span>
+        </label>
+        <button class="btn-check" style="margin-top:14px;" onclick="confirmRulesHelp()" data-i18n="ac.help.gotIt">Got it</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+// Vom Server gespeicherte UI-Sprache (pro Nutzer), siehe renderWithI18n_ in Code.gs.
+var I18N_INITIAL_LANG = <?!= JSON.stringify(uiLang) ?>;
+// Editor-App, in der diese Seite läuft ('docs'/'sheets'/'slides'), siehe _resolveHost_.
+var HOST_APP = <?!= JSON.stringify(hostApp) ?>;
+// true = als großes Regel-Popup geöffnet (apiOpenRulesModal), sonst Seitenleiste.
+var RULES_ONLY = <?!= JSON.stringify(!!rulesOnly) ?>;
+// Gemini-Gems: eigene Regel formulieren bzw. Leitfaden (PDF) -> Import-JSON
+var GEM_URLS = {
+  rule: 'https://gemini.google.com/gem/1U9keOE3XPTPG3QEq63ZCYZ-5EOTruqgC?usp=sharing',
+  json: 'https://gemini.google.com/gem/1bgoe1LSjDPZMId5lf98dBbVQp1KMH2CO?usp=sharing'
+};
+function openGem(kind) {
+  var w = window.open(GEM_URLS[kind], '_blank', 'noopener');
+  if (w) try { w.opener = null; } catch (e) {}
+}
+// Dialog wird gross geoeffnet und hier auf den Bildschirm verkleinert.
+function fitRulesDialog_() {
+  try {
+    var sw = (window.screen && screen.availWidth) || 1366;
+    var sh = (window.screen && screen.availHeight) || 768;
+    var w = Math.max(700, Math.min(1900, sw - 80));
+    var h = Math.max(450, Math.min(1150, sh - 190));
+    if (w < 1900) google.script.host.setWidth(w);
+    if (h < 1150) google.script.host.setHeight(h);
+  } catch (e) {}
+}
+function I18N_PERSIST(lang){ google.script.run.apiSetUiLang(lang); }
+</script>
+<?!= include('I18n'); ?>
+<script>
+var _loadingInterval = null;
+var _currentIssues = [];
+var _issueGroups = [];     // [{ label (HTML), count }] - Kategorien der Funde, Index = data-g der Karten
+var _issueFilter = -1;     // -1 = alle, sonst Index in _issueGroups
+var _issueGrouped = false; // Karten nach Kategorie gruppiert anzeigen (pro Nutzer gemerkt)
+try { _issueGrouped = localStorage.getItem('ac_grouped') === '1'; } catch (e) {}
+var _currentRulesData = [];
+var _pendingNewCustomRules = [];
+var _importedRules = []; // nur für die Spalte „Origin“ im Log
+var _scopeRef = null;      // geprüfter Bereich bei "Nur Auswahl" (siehe apiRunAuthorCheck)
+var _rulesDirty = false;   // ungespeicherte Änderungen im Regel-Popup
+
+// Sprachnamen in den Auswahllisten (Prüfsprache, Regelsprache) in der UI-Sprache anzeigen.
+function onUiLangChanged(){
+  document.querySelectorAll('.content-lang-select option').forEach(function(opt){
+    if (!opt.dataset.fallback) opt.dataset.fallback = opt.textContent;
+    opt.textContent = langName(opt.value, opt.dataset.fallback);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  initUiLangSelects();
+  // Regel-Popup: Regeln sofort laden, nicht erst auf den Kontext warten.
+  if (RULES_ONLY) { fitRulesDialog_(); initRulesModalUI(); }
+  loadContext();
+});
+
+function loadContext(){
+  document.getElementById('ctxLoading').style.display = RULES_ONLY ? 'none' : '';
+  document.getElementById('ctxError').style.display = 'none';
+  google.script.run
+    .withSuccessHandler(function(ctx){
+      document.getElementById('ctxLoading').style.display = 'none';
+      document.getElementById('aiUnavailable').style.display = ctx.aiEnabled ? 'none' : 'block';
+      document.getElementById('mainWrap').style.display = ctx.aiEnabled ? 'block' : 'none';
+      var exportAllBtn = document.getElementById('exportAllToLogBtn');
+      if (exportAllBtn) exportAllBtn.style.display = ctx.isAdmin ? '' : 'none';
+      if (RULES_ONLY && !ctx.rulesHelpSeen) openRulesHelp();
+    })
+    .withFailureHandler(function(err){
+      // Früher blieb die Seitenleiste hier einfach leer.
+      document.getElementById('ctxLoading').style.display = 'none';
+      var box = document.getElementById('ctxError');
+      box.style.display = 'block';
+      showState(box, 'error', { key:'err.connection' }, (err && err.message) ? err.message : String(err));
+      box.querySelector('.state-box').insertAdjacentHTML('beforeend',
+        '<button class="btn-mini ghost" onclick="loadContext()">🔄 '+tl('ac.retry')+'</button>');
+    })
+    .apiGetContext();
+}
+
+document.getElementById('checkBtn').addEventListener('click', runCheck);
+
+function runCheck(){
+  var lang = document.getElementById('lang-select').value;
+  var scope = document.querySelector('input[name="checkScope"]:checked').value;
+  var btn = document.getElementById('checkBtn');
+  var $rw = document.getElementById('resultsWrap');
+  btn.disabled = true;
+  startLoading($rw);
+  google.script.run
+    .withSuccessHandler(function(res){
+      btn.disabled = false;
+      stopLoading();
+      _scopeRef = res.scopeRef || null;
+      renderIssues($rw, res);
+    })
+    .withFailureHandler(function(err){
+      btn.disabled = false;
+      stopLoading();
+      showState($rw, 'error', { key:'ac.checkFailed' }, (err && err.message) ? err.message : String(err));
+    })
+    .apiRunAuthorCheck(lang, scope);
+}
+
+// Lesbare Fehlermeldung aus einem google.script.run-Fehler (kann ein Error, ein
+// String oder leer sein - früher stand dann "{msg}" im Toast).
+function errText(err){
+  if (!err) return t('err.generic');
+  var m = (typeof err === 'string') ? err : (err.message || err.name || '');
+  if (!m) { try { m = JSON.stringify(err); } catch (e) { m = String(err); } }
+  return (!m || m === '{}') ? t('err.generic') : m;
+}
+
+function exportAuditReport(){
+  if (!_currentIssues || !_currentIssues.length) {
+    showToast(t('ac.noIssuesToExport'));
+    return;
+  }
+  showToast('📊 ' + t('ac.generatingReport'));
+  google.script.run
+    .withSuccessHandler(function(url){
+      openUrlOrOffer(url, '📊 ' + t('ac.openingReport'));
+    })
+    .withFailureHandler(function(err){
+      showToast('⚠️ ' + t('ac.exportError', { msg: errText(err) }));
+    })
+    .apiExportAuditReport(_currentIssues);
+}
+
+function startLoading(wrap){
+  stopLoading();
+  var idx = 0, msgs = t('ac.load');
+  function render(){
+    wrap.innerHTML = '<div class="loading-state"><div class="loading-text">'+esc(msgs[idx % msgs.length])+'</div></div>';
+    idx++;
+  }
+  render();
+  _loadingInterval = setInterval(render, 1300);
+}
+
+function stopLoading(){ if (_loadingInterval) { clearInterval(_loadingInterval); _loadingInterval = null; } }
+
+// Hinweis, wenn nicht der ganze Text geprueft werden konnte (sehr lange
+// Dokumente oder einzelne fehlgeschlagene KI-Abschnitte) - frueher wurde das
+// stillschweigend abgeschnitten.
+function checkNoticeHtml(res){
+  var parts = [];
+  if (res && res.truncated) parts.push(tl('ac.truncated', { n: Number(res.maxChars || 0).toLocaleString(getUiLang()) }));
+  if (res && res.failedParts) parts.push(tl('ac.failedParts', { failed: res.failedParts, parts: res.parts }));
+  var html = parts.length ? '<div class="check-notice">⚠️ ' + parts.join('<br>⚠️ ') + '</div>' : '';
+  return html + docReportHtml(res && res.reports);
+}
+
+// Bericht der Gesamtdokument-Prompts (eigenes Google Doc, siehe DocPrompts.gs).
+function docReportHtml(rep){
+  if (!rep) return '';
+  var html = '<div class="check-notice"><b>📄 ' + tl('ac.docReportTitle') + '</b>';
+  var url = safeHref(rep.url);
+  if (url) html += '<br><a class="btn-mini primary" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + tl('ac.docReportOpen') + ' ↗</a>';
+  (rep.notes || []).forEach(function(n){ html += '<br>ℹ️ ' + esc(n); });
+  (rep.items || []).forEach(function(it){
+    if (it.error) html += '<br>⚠️ <b>' + esc(it.title) + ':</b> ' + esc(it.error);
+  });
+  if (rep.error) html += '<br>⚠️ ' + esc(rep.error);
+  return html + '</div>';
+}
+
+function renderIssues(wrap, res){
+  _currentIssues = res.issues || [];
+  if (!_currentIssues.length){
+    showState(wrap, 'empty', { key:'ac.noIssuesTitle', emoji:'🎉' }, { key:'ac.noIssuesSub' });
+    var notice = checkNoticeHtml(res);
+    if (notice) wrap.insertAdjacentHTML('afterbegin', notice);
+    return;
+  }
+  // Kategorien: feste Typen zuerst, dann eigene Prompts in Fundreihenfolge.
+  var order = ['terminology', 'style', 'grammar'], byKey = {};
+  _issueGroups = []; _issueFilter = -1;
+  var keys = _currentIssues.map(issueGroupKey);
+  order.concat(keys).forEach(function(k){
+    if (byKey[k] !== undefined || keys.indexOf(k) === -1) return;
+    var sample = _currentIssues[keys.indexOf(k)];
+    byKey[k] = _issueGroups.length;
+    _issueGroups.push({ label: issueTypeLabel(sample) });
+  });
+  _currentIssues.forEach(function(issue, i){ issue._g = byKey[keys[i]]; });
+  var summary = '<div class="summary-bar">'+
+      '<span id="issueCount">'+tln('ac.issues', _currentIssues.length)+'</span>'+
+      '<div class="bulk-actions">'+
+        '<button class="btn-bulk" onclick="replaceAll()">'+tl('ac.replaceAll')+'</button>'+
+        '<button class="btn-bulk" onclick="noteAll()">'+tl('ac.noteAll')+'</button>'+
+        '<button class="btn-bulk" onclick="ignoreAll()">'+tl('ac.ignoreAll')+'</button>'+
+        '<button class="btn-bulk" style="background:var(--yellow); border-color:var(--yellow);" onclick="exportAuditReport()">'+tl('ac.report')+'</button>'+
+      '</div>'+
+    '</div>';
+  var cards = _currentIssues.map(function(issue, i){ return renderIssueCard(issue, i); }).join('');
+  wrap.innerHTML = checkNoticeHtml(res) + summary + '<div class="issue-filters" id="issueFilters"></div><div id="issueList">' + cards + '</div>';
+  arrangeIssueCards();
+}
+
+function issueGroupKey(issue){ return issue.type === 'prompt' ? 'prompt:' + (issue.rule || '') : issue.type; }
+function issueTypeLabel(issue){
+  if (issue.type === 'prompt') return esc(issue.rule || t('ac.typePrompt'));
+  return tl(issue.type === 'terminology' ? 'ac.typeTerminology' : (issue.type === 'style' ? 'ac.typeStyle' : 'ac.typeGrammar'));
+}
+// Funde im aktuellen Filter (Sammelaktionen wirken nur auf diese).
+function visibleIssues(){
+  return _issueFilter < 0 ? _currentIssues.slice() : _currentIssues.filter(function(i){ return i._g === _issueFilter; });
+}
+function setIssueFilter(g){ _issueFilter = (g === _issueFilter) ? -1 : g; arrangeIssueCards(); }
+function toggleIssueGrouping(on){
+  _issueGrouped = !!on;
+  try { localStorage.setItem('ac_grouped', on ? '1' : '0'); } catch (e) {}
+  arrangeIssueCards();
+}
+// Filterleiste, Zaehler, Sichtbarkeit und Reihenfolge der Karten aktualisieren,
+// ohne die Karten neu zu erzeugen (Status "Ersetzt"/"Notiz" bleibt erhalten).
+function arrangeIssueCards(){
+  var list = document.getElementById('issueList'), bar = document.getElementById('issueFilters');
+  if (!list || !bar) return;
+  var counts = _issueGroups.map(function(){ return 0; });
+  _currentIssues.forEach(function(i){ counts[i._g]++; });
+  if (_issueFilter >= 0 && !counts[_issueFilter]) _issueFilter = -1;
+  var used = counts.filter(function(n){ return n > 0; }).length;
+  var chip = function(g, label, n){
+    return '<button type="button" class="filter-chip' + (_issueFilter === g ? ' active' : '') + '" onclick="setIssueFilter(' + g + ')">' +
+      label + '<span class="chip-count">' + n + '</span></button>';
+  };
+  bar.innerHTML = used < 2 ? '' :
+    chip(-1, tl('ac.filterAll'), _currentIssues.length) +
+    _issueGroups.map(function(gr, g){ return counts[g] ? chip(g, gr.label, counts[g]) : ''; }).join('') +
+    (_issueFilter < 0 ? '<label class="group-toggle"><input type="checkbox"' + (_issueGrouped ? ' checked' : '') +
+      ' onchange="toggleIssueGrouping(this.checked)"> ' + tl('ac.groupByCategory') + '</label>' : '');
+  var countEl = document.getElementById('issueCount');
+  if (countEl) countEl.innerHTML = tln('ac.issues', visibleIssues().length);
+
+  list.querySelectorAll('.group-head').forEach(function(h){ h.remove(); });
+  var ordered = _currentIssues.slice();
+  if (_issueGrouped && _issueFilter < 0 && used > 1) {
+    ordered.sort(function(a, b){ return a._g - b._g || _currentIssues.indexOf(a) - _currentIssues.indexOf(b); });
+  }
+  var lastG = null;
+  ordered.forEach(function(issue){
+    var card = document.getElementById(issue.id);
+    if (!card) return;
+    card.style.display = (_issueFilter < 0 || issue._g === _issueFilter) ? '' : 'none';
+    if (_issueGrouped && _issueFilter < 0 && used > 1 && issue._g !== lastG) {
+      lastG = issue._g;
+      var head = document.createElement('div');
+      head.className = 'group-head';
+      head.innerHTML = _issueGroups[issue._g].label + ' · ' + counts[issue._g];
+      list.appendChild(head);
+    }
+    list.appendChild(card);
+  });
+}
+
+function renderIssueCard(issue, idx){
+  // Funde eines Gesamtdokument-Prompts tragen den Regelnamen; "Ersetzen" nur,
+  // wenn der Vorschlag ein direkter Ersatztext ist.
+  var isPrompt = issue.type === 'prompt';
+  var label = issueTypeLabel(issue);
+  var canReplace = !isPrompt || issue.replaceable;
+  var delay = Math.min(idx * 30, 200);
+  return '<div class="issue-card '+(isPrompt ? 'prompt' : '')+'" id="'+issue.id+'" style="animation-delay:'+delay+'ms">'+
+    '<div class="issue-head">'+
+      '<span class="type-badge '+issue.type+'"'+(isPrompt && issue.rule ? ' title="'+esc(issue.rule)+'"' : '')+'>'+label+'</span>'+
+      (issue.location ? '<span class="issue-location">'+esc(issue.location)+'</span>' : '')+
+      '<button class="issue-dismiss"'+tAttrTitle('ac.ignoreTitle')+' onclick="dismissIssue(\''+issue.id+'\')">'+
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6L6 18"/></svg>'+
+      '</button>'+
+    '</div>'+
+    '<div class="issue-body">'+
+      '<div class="diff-line"><span class="diff-original">'+esc(issue.original)+'</span><span class="diff-arrow">→</span><span class="diff-suggestion">'+esc(issue.suggestion)+'</span></div>'+
+      '<div class="issue-explanation">'+esc(issue.explanation||'')+'</div>'+
+      '<div class="issue-actions">'+
+        (canReplace ? '<button class="btn-mini primary"'+tAttrTitle('ac.replaceTitle')+' onclick="applyIssue(\''+issue.id+'\')">'+tl('ac.replace')+'</button>' : '')+
+        '<button class="btn-mini ghost"'+tAttrTitle('ac.jumpTitle')+' onclick="jumpToIssue(\''+issue.id+'\')">'+tl('ac.jump')+'</button>'+
+        '<button class="btn-mini ghost"'+tAttrTitle('ac.noteTitle')+' onclick="commentIssue(\''+issue.id+'\')">'+tl('ac.note')+'</button>'+
+        '<button class="btn-mini ghost"'+tAttrTitle('ac.ignoreTitle')+' onclick="dismissIssue(\''+issue.id+'\')">'+tl('ac.ignore')+'</button>'+
+      '</div>'+
+    '</div>'+
+  '</div>';
+}
+
+function applyIssue(id){
+  var issue = _currentIssues.find(function(i){ return i.id === id; });
+  if (!issue) return;
+  var card = document.getElementById(id);
+  var actions = card.querySelector('.issue-actions');
+  actions.innerHTML = '<span class="status-note">'+tl('ac.replacing')+'</span>';
+  google.script.run
+    .withSuccessHandler(function(r){
+      card.classList.add('applied');
+      actions.innerHTML = '<span class="applied-tag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg> '+tl('ac.replaced')+'</span>' +
+        (r.remaining ? '<span class="remaining-hint">' + tln('ac.remaining', r.remaining) + '</span>' +
+          '<button class="btn-mini ghost btn-next" onclick="applyIssue(\''+id+'\')">'+tl('ac.replaceNext')+'</button>' : '');
+      showToast('✅ ' + (r.remaining ? t('ac.replacedFirst', { n: r.remaining }) : t('ac.correctionApplied')));
+    })
+    .withFailureHandler(function(err){
+      actions.innerHTML = '<button class="btn-mini primary" onclick="applyIssue(\''+id+'\')">'+tl('ac.retry')+'</button><button class="btn-mini ghost" onclick="dismissIssue(\''+id+'\')">'+tl('ac.ignore')+'</button>';
+      showToast('⚠️ ' + t('ac.error', { msg: (err && err.message) ? err.message : String(err) }));
+    })
+    .apiApplyAuthorCheckFix(issue.original, issue.suggestion, _scopeRef);
+}
+
+function jumpToIssue(id) {
+  var issue = _currentIssues.find(function(i){ return i.id === id; });
+  if (!issue) return;
+  showToast('📍 ' + t('ac.jumping'));
+  google.script.run
+    .withSuccessHandler(function(found) {
+      if (!found) showToast('🤷 ' + t('ac.locationNotFound'));
+    })
+    .withFailureHandler(function(err){ showToast('⚠️ ' + t('ac.error', { msg: errText(err) })); })
+    .apiJumpToIssue(issue.original, _scopeRef);
+}
+
+function commentIssue(id) {
+  var issue = _currentIssues.find(function(i){ return i.id === id; });
+  if (!issue) return;
+  var card = document.getElementById(id);
+  var actions = card.querySelector('.issue-actions');
+  actions.innerHTML = '<span class="status-note">'+tl('ac.addingNote')+'</span>';
+  
+  google.script.run
+    .withSuccessHandler(function(found) {
+      if (found) {
+        card.classList.add('applied');
+        actions.innerHTML = '<span class="applied-tag">📝 '+tl('ac.noteAdded')+'</span>';
+        showToast('📝 ' + t('ac.noteInserted'));
+      } else {
+        actions.innerHTML = '<span class="failed-tag">'+tl('ac.textNotFound')+'</span>';
+      }
+    })
+    .withFailureHandler(function(err){
+      actions.innerHTML = '<button class="btn-mini ghost" onclick="commentIssue(\''+id+'\')">'+tl('ac.retryNote')+'</button><button class="btn-mini ghost" onclick="dismissIssue(\''+id+'\')">'+tl('ac.ignore')+'</button>';
+      showToast('⚠️ ' + t('ac.error', { msg: (err && err.message) ? err.message : String(err) }));
+    })
+    .apiCommentIssue(issue.original, issue.suggestion, issue.explanation, _scopeRef);
+}
+
+function dismissIssue(id){
+  var card = document.getElementById(id);
+  if (card) card.remove();
+  _currentIssues = _currentIssues.filter(function(i){ return i.id !== id; });
+  if (!_currentIssues.length) {
+    showState(document.getElementById('resultsWrap'), 'empty', { key:'ac.noOpenTitle', emoji:'✨' }, { key:'ac.noOpenSub' });
+  } else {
+    arrangeIssueCards();
+  }
+}
+
+/* ─── BULK ACTIONS ───────────────────────────────────────────────────────── */
+function replaceAll(){
+  // Funde eigener Gesamtdokument-Prompts ohne direkten Ersatztext nicht ersetzen.
+  var pending = visibleIssues().filter(function(it){ return it.type !== 'prompt' || it.replaceable; });
+  if (!pending.length) return;
+  if (!confirm(tn('ac.confirmReplaceAll', pending.length))) return;
+  showToast(t('ac.replacingAll'));
+  var ok = 0, failed = 0;
+  function next(i){
+    if (i >= pending.length) {
+      showToast(failed ? '⚠️ ' + t('ac.replaceAllPartial', { ok: ok, failed: failed }) : '✅ ' + t('ac.replaceAllOk', { ok: ok }));
+      return;
+    }
+    var issue = pending[i];
+    var card = document.getElementById(issue.id);
+    if (!card || card.classList.contains('applied')) { next(i+1); return; }
+    google.script.run
+      .withSuccessHandler(function(r){
+        ok++;
+        card.classList.add('applied');
+        var actions = card.querySelector('.issue-actions');
+        if (actions) actions.innerHTML = '<span class="applied-tag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg> '+tl('ac.replaced')+'</span>';
+        next(i+1);
+      })
+      .withFailureHandler(function(){
+        failed++;
+        var actions = card.querySelector('.issue-actions');
+        if (actions && !actions.querySelector('.failed-tag')) actions.insertAdjacentHTML('afterbegin', '<span class="failed-tag">'+tl('ac.notFound')+'</span>');
+        next(i+1);
+      })
+      .apiApplyAuthorCheckFix(issue.original, issue.suggestion, _scopeRef);
+  }
+  next(0);
+}
+
+function noteAll(){
+  var pending = visibleIssues();
+  if (!pending.length) return;
+  showToast(t('ac.addingNotesAll'));
+  var ok = 0, failed = 0;
+  function next(i){
+    if (i >= pending.length) {
+      showToast(failed ? '⚠️ ' + t('ac.noteAllPartial', { ok: ok, failed: failed }) : '📝 ' + t('ac.noteAllOk', { ok: ok }));
+      return;
+    }
+    var issue = pending[i];
+    var card = document.getElementById(issue.id);
+    if (!card || card.classList.contains('applied')) { next(i+1); return; }
+    google.script.run
+      .withSuccessHandler(function(found){
+        if (found) {
+          ok++;
+          card.classList.add('applied');
+          var actions = card.querySelector('.issue-actions');
+          if (actions) actions.innerHTML = '<span class="applied-tag">📝 '+tl('ac.noteAdded')+'</span>';
+        } else {
+          failed++;
+        }
+        next(i+1);
+      })
+      .withFailureHandler(function(){ failed++; next(i+1); })
+      .apiCommentIssue(issue.original, issue.suggestion, issue.explanation, _scopeRef);
+  }
+  next(0);
+}
+
+function ignoreAll(){
+  // Bei aktivem Filter nur die angezeigte Kategorie ausblenden.
+  var gone = visibleIssues();
+  gone.forEach(function(i){ var c = document.getElementById(i.id); if (c) c.remove(); });
+  _currentIssues = _currentIssues.filter(function(i){ return gone.indexOf(i) === -1; });
+  if (_currentIssues.length) { _issueFilter = -1; arrangeIssueCards(); return; }
+  showState(document.getElementById('resultsWrap'), 'empty', { key:'ac.allIgnoredTitle', emoji:'🙈' }, { key:'ac.allIgnoredSub' });
+}
+
+// title/sub: Rohtext (z.B. Server-Fehlermeldung) oder { key, vars, emoji } für i18n
+function showState(wrap, type, title, sub){
+  var part = function(x){ return (x && typeof x === 'object') ? (x.emoji ? x.emoji + ' ' : '') + tl(x.key, x.vars) : esc(x); };
+  var icons = {
+    empty: '<svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="24" stroke="#3A3A3A" stroke-width="2.5"/><path d="M22 33l7 7 15-15" stroke="#3A3A3A" stroke-width="2.5"/></svg>',
+    error: '<svg viewBox="0 0 64 64" fill="none"><rect x="10" y="10" width="44" height="44" stroke="#D32F2F" stroke-width="2.5"/><path d="M22 22l20 20M42 22L22 42" stroke="#D32F2F" stroke-width="2.5"/></svg>'
+  };
+  wrap.innerHTML = '<div class="state-box"><div class="state-icon-wrap">'+(icons[type]||icons.empty)+'</div>'+
+    '<div class="state-title">'+part(title)+'</div><div class="state-sub">'+part(sub)+'</div></div>';
+}
+
+function showToast(msg){
+  var el = document.getElementById('toast');
+  el.textContent = msg; el.classList.remove('has-link'); el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(function(){ el.classList.remove('show'); }, 1800);
+}
+// Toast mit anklickbarem Link, bleibt länger stehen.
+function showLinkToast(msg, url){
+  var el = document.getElementById('toast');
+  var href = safeHref(url);
+  el.innerHTML = esc(msg) + (href ? '<a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">'+tl('link.open')+' ↗</a>' : '');
+  el.classList.add('show', 'has-link');
+  clearTimeout(el._t);
+  el._t = setTimeout(function(){ el.classList.remove('show', 'has-link'); }, 10000);
+}
+// Neuen Tab öffnen. Da das erst in der Server-Antwort passiert (nicht direkt beim
+// Klick), blockiert der Browser das oft als Popup - dann den Link anbieten.
+function openUrlOrOffer(url, msg){
+  var w = null;
+  try { w = window.open(url, '_blank', 'noopener'); } catch(e) {}
+  if (w) showToast(msg); else showLinkToast(msg, url);
+}
+
+function esc(str){ if (!str) return ''; return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// Für Werte, die in ein einfach-gequotetes onclick="...('...')"-JS-Literal eingebettet
+// werden (z.B. r.Name aus importierten/custom Regeln, siehe importRulesFile): erst als
+// JS-String escapen (\ und '), danach zusätzlich als HTML-Attribut escapen, da das
+// gesamte onclick-Attribut selbst wieder in doppelten Anführungszeichen steht.
+function escJsAttr(str){
+  return String(str||'')
+    .replace(/\\/g,'\\\\')
+    .replace(/'/g,"\\'")
+    .replace(/\n/g,'\\n')
+    .replace(/\r/g,'\\r')
+    .replace(/&/g,'&amp;')
+    .replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+// Nur http(s)-Links zulassen: verhindert z.B. "javascript:"-URLs in importierten/
+// geteilten Regeln (ReferenceUrl), die sonst beim Klick im Sidebar-Kontext ausgeführt würden.
+function safeHref(url){
+  var u = String(url||'').trim();
+  return /^https?:\/\//i.test(u) ? u : '';
+}
+
+function openRulesHelp() {
+  document.getElementById('rulesHelpOverlay').classList.add('open');
+}
+
+function confirmRulesHelp() {
+  var dontShow = document.getElementById('rulesHelpDontShow').checked;
+  document.getElementById('rulesHelpOverlay').classList.remove('open');
+  if (dontShow) {
+    google.script.run.apiMarkRulesHelpSeen();
+  }
+}
+
+/* ─── RULES SETTINGS MODAL ────────────────────────────────────────────────── */
+function openRulesSettings() {
+  var btn = document.getElementById('rulesBtn');
+  var icon = document.getElementById('rulesBtnIcon');
+  var spinner = document.getElementById('rulesBtnSpinner');
+  btn.disabled = true;
+  icon.style.display = 'none';
+  spinner.style.display = 'inline-block';
+
+  var resetBtn = function() {
+    btn.disabled = false;
+    icon.style.display = '';
+    spinner.style.display = 'none';
+  };
+  var timeoutId = setTimeout(resetBtn, 5000);
+
+  // Ruft das große Popup im Backend auf, falls wir uns in der Seitenleiste befinden
+  google.script.run
+    .withSuccessHandler(function(){ clearTimeout(timeoutId); resetBtn(); })
+    .withFailureHandler(function(err){ clearTimeout(timeoutId); resetBtn(); showToast('⚠️ ' + t('ac.error', { msg: errText(err) })); })
+    .apiOpenRulesModal(HOST_APP);
+}
+
+function closeRulesSettings() {
+  if (_rulesDirty && !confirm(t('ac.discardChanges'))) return;
+  var modalEl = document.getElementById('rulesModal');
+  if (modalEl) modalEl.classList.remove('open');
+  // Schließt den Modal-Dialog in Google Docs/Sheets/Slides
+  google.script.host.close();
+}
+
+// Wird beim Initialisieren des Modals aufgerufen
+var _currentRulesLang = 'de';
+
+function initRulesModalUI() {
+  document.getElementById('rulesModal').classList.add('open');
+  loadRulesForLanguage(_currentRulesLang);
+}
+function onRulesLangChange() {
+  var sel = document.getElementById('rulesLangSelect');
+  if (_rulesDirty && !confirm(t('ac.discardChanges'))) { sel.value = _currentRulesLang; return; }
+  _currentRulesLang = sel.value;
+  _pendingNewCustomRules = [];
+  loadRulesForLanguage(_currentRulesLang);
+}
+
+// Übernimmt Häkchen und Parameter aus der Liste in _currentRulesData. Vorher
+// aufrufen, bevor die Liste neu gezeichnet wird (Verschieben, Neue Regel, Import) -
+// sonst gingen ungespeicherte Änderungen verloren.
+function syncRulesFromDom() {
+  var body = document.getElementById('rulesListContainer');
+  if (!body) return;
+  _currentRulesData.forEach(function(r) {
+    var cb = body.querySelector('input.rule-checkbox[data-name="'+cssEscapeAC(r.Name)+'"]');
+    var sel = body.querySelector('select[data-name="'+cssEscapeAC(r.Name)+'"]');
+    if (cb) r.IsEnabled = cb.checked;
+    if (sel) r.Parameter = sel.value;
+  });
+}
+function loadRulesForLanguage(lang) {
+  var listEl = document.getElementById('rulesListContainer');
+  listEl.innerHTML = '<div class="loading-state"><div class="loading-text">'+tl('ac.loadingRules')+'</div></div>';
+  google.script.run
+    .withSuccessHandler(function(rules) {
+      _currentRulesData = rules;
+      _rulesDirty = false;
+      renderRulesUI(rules);
+    })
+    .withFailureHandler(function(err) {
+      listEl.innerHTML = '<div style="color:red; text-align:center; padding:20px;">⚠️ '+tl('ac.error', { msg: err && err.message ? err.message : String(err) })+'</div>';
+    })
+    .apiGetRulesConfig(lang);
+}
+function renderRulesUI(rules) {
+  var container = document.getElementById('rulesListContainer');
+  if (!rules || rules.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:20px; color:#767676;">'+tl('ac.noRules')+'</div>';
+    return;
+  }
+  var existingTypes = {};
+  rules.forEach(function(r) { if(r.Type) existingTypes[r.Type] = true; });
+  var typeOptionsHtml = Object.keys(existingTypes).map(function(t) {
+    return '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+  }).join('');
+  var topAddHeader = '<div style="margin-bottom:12px; padding:10px; background:var(--gray-50); border:1px solid var(--gray-200);">' +
+    '<div class="gem-row">' +
+      '<button type="button" class="btn-mini ghost" onclick="openGem(\'rule\')">🤖 '+tl('ac.prepareGemini')+'</button>' +
+      '<button type="button" class="btn-mini ghost" onclick="openGem(\'json\')">🤖 '+tl('ac.jsonGemini')+'</button>' +
+    '</div>' +
+    '<button class="btn-mini primary" style="width:100%; font-weight:bold;" onclick="toggleAddCustomRuleForm()">'+tl('ac.createRule')+'</button>' +
+    '<div id="addCustomRuleForm" style="display:none; margin-top:10px; border-top:1px solid var(--gray-200); padding-top:10px;">' +
+      '<label style="font-size:10px; font-weight:bold; color:var(--gray-500); text-transform:uppercase;">'+tl('ac.categoryLabel')+'</label>' +
+      '<select id="newRuleGroupSelect" onchange="onCategorySelectChange(this)" style="width:100%; margin-bottom:6px; padding:5px; font-size:11px; border:1px solid var(--gray-300);">' +
+        '<option value="" data-i18n="ac.selectGroup">'+esc(t('ac.selectGroup'))+'</option>' +
+        typeOptionsHtml +
+        '<option value="__NEW__" data-i18n="ac.newGroupOpt">'+esc(t('ac.newGroupOpt'))+'</option>' +
+      '</select>' +
+      '<input type="text" id="newRuleCustomGroup"'+tAttrPh('ac.newGroupPh')+' style="display:none; width:100%; margin-bottom:6px; padding:5px; font-size:11px;">' +
+      '<label style="font-size:10px; font-weight:bold; color:var(--gray-500); text-transform:uppercase;">'+tl('ac.typeLabel')+'</label>' +
+      '<select id="newRuleKind" onchange="onRuleKindChange(this)" style="width:100%; margin-bottom:6px; padding:5px; font-size:11px; border:1px solid var(--gray-300);">' +
+        '<option value="PROMPT" selected data-i18n="ac.kindPrompt">'+esc(t('ac.kindPrompt'))+'</option>' +
+        '<option value="RULE" data-i18n="ac.kindRule">'+esc(t('ac.kindRule'))+'</option>' +
+      '</select>' +
+      '<input type="text" id="newRuleName"'+tAttrPh('ac.titlePh')+' style="width:100%; margin-bottom:6px; padding:5px; font-size:11px;">' +
+      '<input type="text" id="newRuleDesc"'+tAttrPh('ac.descPh')+' style="width:100%; margin-bottom:6px; padding:5px; font-size:11px;">' +
+      '<div id="newRuleScopeWrap">' +
+        '<label style="font-size:10px; font-weight:bold; color:var(--gray-500); text-transform:uppercase;">'+tl('ac.scopeLabel')+'</label>' +
+        '<select id="newRuleScope" style="width:100%; margin-bottom:4px; padding:5px; font-size:11px; border:1px solid var(--gray-300);">' +
+          '<option value="" selected data-i18n="ac.scopePassage">'+esc(t('ac.scopePassage'))+'</option>' +
+          '<option value="DOCUMENT" data-i18n="ac.scopeDocument">'+esc(t('ac.scopeDocument'))+'</option>' +
+        '</select>' +
+        '<div class="scope-help">'+tl('ac.scopeHelp')+'</div>' +
+      '</div>' +
+      '<textarea id="newRulePrompt"'+tAttrPh('ac.promptPh')+' style="width:100%; height:55px; margin-bottom:6px; padding:5px; font-size:11px; font-family:inherit;"></textarea>' +
+      '<input type="text" id="newRuleRefUrl"'+tAttrPh('ac.refUrlPh')+' style="width:100%; margin-bottom:6px; padding:5px; font-size:11px;">' +
+      '<button class="btn-mini primary" style="width:100%;" onclick="addNewCustomRule()">'+tl('ac.addRule')+'</button>' +
+    '</div>' +
+  '</div>';
+    var sections = {};
+  rules.forEach(function(r) {
+    var section = r.Section || r.Type || 'Other';
+    var subsection = r.Subsection || 'General';
+    if (!sections[section]) sections[section] = {};
+    if (!sections[section][subsection]) sections[section][subsection] = [];
+    sections[section][subsection].push(r);
+  });
+
+  var html = '';
+  Object.keys(sections).sort().forEach(function(section) {
+    html += '<div class="rule-group">';
+    html +=   '<div class="rule-group-header" onclick="this.parentElement.classList.toggle(\'expanded\')">';
+    html +=     '<label style="display:flex; align-items:center; gap:8px; cursor:pointer;" onclick="event.stopPropagation();">';
+    html +=       '<input type="checkbox" class="select-all-checkbox" data-group="'+esc(section)+'" onclick="toggleGroupAll(\''+escJsAttr(section)+'\', this.checked)">';
+    html +=       '<h3 style="margin:0;">' + esc(section) + '</h3>';
+    var secInfo = sectionDeleteInfo(section);
+    // Etikett nur, wenn der Name es nicht schon sagt (ältere eigene Regeln ohne "Custom"-Kategorie).
+    if (secInfo.custom && !/^Custom\b/i.test(section)) html += '<span class="custom-tag">Custom</span>';
+    html +=     '</label>';
+    if (secInfo.custom || secInfo.moved) {
+      html +=   '<button type="button" class="btn-del"'+tAttrTitle('ac.deleteSection')+' aria-label="'+esc(t('ac.deleteSection'))+'" onclick="event.stopPropagation(); deleteRuleSection(\''+escJsAttr(section)+'\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>';
+    }
+    html +=     '<span class="rule-group-chevron"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></span>';
+    html +=   '</div>';
+    html +=   '<div class="rule-group-body">';
+    Object.keys(sections[section]).sort().forEach(function(sub) {
+      var subId = section + '__' + sub;
+      html += '<div class="rule-subgroup">';
+      html +=   '<div class="rule-subgroup-header" onclick="this.parentElement.classList.toggle(\'expanded\')">';
+      html +=     '<label style="display:flex; align-items:center; gap:8px; cursor:pointer;" onclick="event.stopPropagation();">';
+      html +=       '<input type="checkbox" class="select-all-checkbox-sub" data-subgroup="'+esc(subId)+'" onclick="toggleSubgroupAll(\''+escJsAttr(subId)+'\', this.checked)">';
+      html +=       '<h4 style="margin:0;">' + esc(sub) + '</h4>';
+      html +=     '</label>';
+      html +=     '<span class="rule-subgroup-chevron"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><path d="M6 9l6 6 6-6"/></svg></span>';
+      html +=   '</div>';
+      html +=   '<div class="rule-subgroup-body">';
+      sections[section][sub].forEach(function(r) {
+        var checked = r.IsEnabled ? 'checked' : '';
+        var inputHtml = '';
+        if (r.IsConfigurable && r.AllowedParameterValues && r.AllowedParameterValues.length) {
+          var options = r.AllowedParameterValues.map(function(v) {
+            var sel = (String(v) === String(r.Parameter)) ? 'selected' : '';
+            return '<option value="'+esc(v)+'" '+sel+'>'+esc(v)+'</option>';
+          }).join('');
+          inputHtml = '<select data-name="'+esc(r.Name)+'">' + options + '</select>';
+        }
+        var safeRefUrl = safeHref(r.ReferenceUrl);
+        var refLinkHtml = safeRefUrl ? (
+          '<a href="'+esc(safeRefUrl)+'" target="_blank" class="btn-move"'+tAttrTitle('ac.openReference')+' onclick="event.stopPropagation();">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1"/></svg>' +
+          '</a>'
+        ) : '';
+        html += '<div class="rule-item" data-rule="'+esc(r.Name)+'">' +
+                '<label><input type="checkbox" class="rule-checkbox" data-name="'+esc(r.Name)+'" data-group="'+esc(section)+'" data-subgroup="'+esc(subId)+'" onchange="updateGroupSelectAllState(\''+escJsAttr(section)+'\'); updateSubgroupSelectAllState(\''+escJsAttr(subId)+'\')" '+checked+'> <span class="rule-desc">' + esc(r.Description) + '</span>' +
+                  (ruleTextEdited(r) ? ' <span class="edited-tag">'+tl('ac.editedTag')+'</span>' : '') +
+                  // Standardregel in einer Custom-Kategorie kenntlich machen (hat keinen Papierkorb).
+                  (!isCustomRule(r) && r.DefaultSection && r.DefaultSection !== section ? ' <span class="std-tag"'+tAttrTitle('ac.stdTagTitle')+'>Standard</span>' : '') + '</label>' +
+                (isCustomRule(r) && r.RuleKind === 'PROMPT' ? scopeTagHtml(r) : '') +
+                inputHtml +
+                refLinkHtml +
+                '<button type="button" class="btn-expand"'+tAttrTitle('ac.details')+' aria-label="'+esc(t('ac.details'))+'" onclick="toggleRuleDetails(this)">' +
+                  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><path d="M6 9l6 6 6-6"/></svg>' +
+                '</button>' +
+                '<button class="btn-move"'+tAttrTitle('ac.moveRuleTitle')+' onclick="openMoveRuleDialog(\''+escJsAttr(r.Name)+'\')">' +
+                  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M3 6h18M3 12h18M3 18h18"/></svg>' +
+                '</button>' +
+                (isCustomRule(r) ? '<button type="button" class="btn-del"'+tAttrTitle('ac.deleteRule')+' aria-label="'+esc(t('ac.deleteRule'))+'" onclick="deleteCustomRule(\''+escJsAttr(r.Name)+'\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>' : '') +
+                '<div class="rule-details"></div>' +
+                '</div>';
+      });
+      html += '</div></div>';
+    });
+    html += '</div></div>';
+  });
+
+  container.innerHTML = topAddHeader + html;
+  if (!container._dirtyWatch) {
+    container.addEventListener('change', function(ev){
+      if (ev.target.matches('.rule-checkbox, .select-all-checkbox, .select-all-checkbox-sub, select[data-name]')) _rulesDirty = true;
+    });
+    container._dirtyWatch = true;
+  }
+  Object.keys(sections).forEach(function(section) {
+    updateGroupSelectAllState(section);
+    Object.keys(sections[section]).forEach(function(sub) {
+      updateSubgroupSelectAllState(section + '__' + sub);
+    });
+  });
+  // Aktive Suche nach dem Neuzeichnen wieder anwenden.
+  filterRulesList();
+}
+// ─── Regel-Details: aufklappen, ansehen, bearbeiten ─────────────────────────
+// Standardregeln: Regeltext (geht so an die KI) aenderbar, "Standardtext
+// wiederherstellen" setzt ihn zurueck. Eigene Regeln: Beschreibung, Prompt
+// (voller Text), Referenz-Link und Geltungsbereich. Gespeichert wird mit
+// "Einstellungen speichern" wie alles andere im Popup.
+function ruleTextEdited(r) { return !isCustomRule(r) && r.DefaultDescription && r.Description !== r.DefaultDescription; }
+function findRule(name) { return _currentRulesData.find(function(x) { return x.Name === name; }); }
+function toggleRuleDetails(btn) {
+  var item = btn.closest('.rule-item');
+  var open = !item.classList.contains('open');
+  if (open) item.querySelector('.rule-details').innerHTML = ruleDetailsHtml(findRule(item.dataset.rule));
+  item.classList.toggle('open', open);
+}
+function ruleDetailsHtml(r) {
+  if (!r) return '';
+  var n = escJsAttr(r.Name);
+  var meta = 'ID <code>' + esc(r.BaseName || r.Name) + '</code> · ' + esc(r.Type || '') +
+    (r.Information ? '<br>ℹ️ ' + esc(r.Information) : '');
+  var html = '<div class="rd-meta">' + meta + '</div>';
+  if (!isCustomRule(r)) {
+    html += '<label class="rd-label">' + tl('ac.ruleText') + '</label>' +
+      '<textarea rows="2" maxlength="2000" oninput="editRuleField(\'' + n + '\', \'Description\', this.value)">' + esc(r.Description) + '</textarea>' +
+      '<div class="rd-hint">' + tl('ac.ruleTextHint') + '</div>';
+    if (r.DefaultDescription && r.DefaultDescription !== r.Description) {
+      html += '<div class="rd-hint">' + tl('ac.standardText') + ': ' + esc(r.DefaultDescription) + '</div>' +
+        '<div class="rd-row"><button type="button" class="btn-mini ghost" onclick="restoreRuleText(\'' + n + '\')">' + tl('ac.restoreText') + '</button></div>';
+    }
+    return html;
+  }
+  html += '<label class="rd-label">' + tl('ac.descLabel') + '</label>' +
+    '<input type="text" maxlength="1000" value="' + esc(r.Description) + '" oninput="editRuleField(\'' + n + '\', \'Description\', this.value)">';
+  if (r.RuleKind === 'PROMPT' || r.CustomPrompt) {
+    html += '<label class="rd-label">' + tl('ac.promptLabel') + ' <span class="rd-count" style="font-weight:normal;">' + promptCountText(r.CustomPrompt) + '</span></label>' +
+      '<textarea class="rd-prompt" maxlength="50000" rows="' + Math.min(24, Math.max(5, String(r.CustomPrompt || '').split('\n').length + 1)) + '" oninput="editRuleField(\'' + n + '\', \'CustomPrompt\', this.value)">' + esc(r.CustomPrompt || '') + '</textarea>';
+  }
+  html += '<label class="rd-label">' + tl('ac.refUrlLabel') + '</label>' +
+    '<input type="text" value="' + esc(r.ReferenceUrl || '') + '" placeholder="https://…" oninput="editRuleField(\'' + n + '\', \'ReferenceUrl\', this.value)">';
+  return html;
+}
+function promptCountText(text) {
+  return '(' + String(text || '').length.toLocaleString(getUiLang()) + ' / ' + (50000).toLocaleString(getUiLang()) + ')';
+}
+function editRuleField(name, field, value) {
+  var r = findRule(name);
+  if (!r) return;
+  if (field === 'ReferenceUrl') value = value.trim() ? value.trim() : null;
+  r[field] = value;
+  _rulesDirty = true;
+  var item = document.querySelector('.rule-item[data-rule="' + cssEscapeAC(name) + '"]');
+  if (!item) return;
+  if (field === 'Description') {
+    var span = item.querySelector('.rule-desc');
+    if (span) span.textContent = value;
+  }
+  if (field === 'CustomPrompt') {
+    var count = item.querySelector('.rd-count');
+    if (count) count.textContent = promptCountText(value);
+  }
+}
+function restoreRuleText(name) {
+  var r = findRule(name);
+  if (!r) return;
+  syncRulesFromDom();
+  r.Description = r.DefaultDescription;
+  _rulesDirty = true;
+  renderRulesUI(_currentRulesData);
+  var item = document.querySelector('.rule-item[data-rule="' + cssEscapeAC(name) + '"]');
+  if (item) { item.closest('.rule-group').classList.add('expanded'); item.closest('.rule-subgroup').classList.add('expanded'); toggleRuleDetails(item.querySelector('.btn-expand')); }
+}
+// Umschalter "Pro Abschnitt" / "Gesamtdokument" an eigenen KI-Prompt-Regeln.
+function scopeTagHtml(r) {
+  var doc = r.PromptScope === 'DOCUMENT';
+  return '<button type="button" class="scope-tag' + (doc ? ' doc' : '') + '"' + tAttrTitle('ac.scopeToggleTitle') +
+    ' onclick="toggleRuleScope(\''+escJsAttr(r.Name)+'\')">' + tl(doc ? 'ac.scopeTagDocument' : 'ac.scopeTagPassage') + '</button>';
+}
+function toggleRuleScope(name) {
+  syncRulesFromDom();
+  var r = _currentRulesData.find(function(x) { return x.Name === name; });
+  if (!r) return;
+  r.PromptScope = r.PromptScope === 'DOCUMENT' ? '' : 'DOCUMENT';
+  _rulesDirty = true;
+  renderRulesUI(_currentRulesData);
+  showToast(t(r.PromptScope ? 'ac.scopeSetDocument' : 'ac.scopeSetPassage'));
+}
+function toggleGroupAll(section, checked) {
+  var container = document.getElementById('rulesListContainer');
+  var boxes = container.querySelectorAll('.rule-checkbox[data-group="'+cssEscapeAC(section)+'"]');
+  boxes.forEach(function(cb) { cb.checked = checked; });
+  container.querySelectorAll('.select-all-checkbox-sub').forEach(function(sa) {
+    if (sa.dataset.subgroup.indexOf(section + '__') === 0) {
+      updateSubgroupSelectAllState(sa.dataset.subgroup);
+    }
+  });
+}
+function updateGroupSelectAllState(section) {
+  var container = document.getElementById('rulesListContainer');
+  var boxes = container.querySelectorAll('.rule-checkbox[data-group="'+cssEscapeAC(section)+'"]');
+  var selectAll = container.querySelector('.select-all-checkbox[data-group="'+cssEscapeAC(section)+'"]');
+  if (!selectAll || !boxes.length) return;
+  var checkedCount = 0;
+  boxes.forEach(function(cb) { if (cb.checked) checkedCount++; });
+  selectAll.checked = checkedCount === boxes.length;
+  selectAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+}
+function toggleSubgroupAll(subId, checked) {
+  var container = document.getElementById('rulesListContainer');
+  var boxes = container.querySelectorAll('.rule-checkbox[data-subgroup="'+cssEscapeAC(subId)+'"]');
+  boxes.forEach(function(cb) { cb.checked = checked; });
+  var section = subId.split('__')[0];
+  updateGroupSelectAllState(section);
+}
+function updateSubgroupSelectAllState(subId) {
+  var container = document.getElementById('rulesListContainer');
+  var boxes = container.querySelectorAll('.rule-checkbox[data-subgroup="'+cssEscapeAC(subId)+'"]');
+  var selectAll = container.querySelector('.select-all-checkbox-sub[data-subgroup="'+cssEscapeAC(subId)+'"]');
+  if (!selectAll || !boxes.length) return;
+  var checkedCount = 0;
+  boxes.forEach(function(cb) { if (cb.checked) checkedCount++; });
+  selectAll.checked = checkedCount === boxes.length;
+  selectAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+}
+function cssEscapeAC(str) {
+  return String(str).replace(/["\\]/g, '\\$&');
+}
+
+function filterRulesList() {
+  var query = document.getElementById('rulesSearchInput').value.trim().toLowerCase();
+  var container = document.getElementById('rulesListContainer');
+  if (!container) return;
+
+  container.querySelectorAll('.rule-item').forEach(function(item) {
+    var text = item.textContent.toLowerCase();
+    item.style.display = (!query || text.indexOf(query) !== -1) ? '' : 'none';
+  });
+
+  container.querySelectorAll('.rule-subgroup').forEach(function(sub) {
+    var visibleItems = sub.querySelectorAll('.rule-item:not([style*="display: none"])');
+    var hasMatch = visibleItems.length > 0;
+    sub.style.display = hasMatch ? '' : 'none';
+    if (query && hasMatch) sub.classList.add('expanded');
+    else if (!query) sub.classList.remove('expanded');
+  });
+
+  container.querySelectorAll('.rule-group').forEach(function(grp) {
+    var visibleSubs = grp.querySelectorAll('.rule-subgroup:not([style*="display: none"])');
+    var hasMatch = visibleSubs.length > 0;
+    grp.style.display = hasMatch ? '' : 'none';
+    if (query && hasMatch) grp.classList.add('expanded');
+    else if (!query) grp.classList.remove('expanded');
+  });
+}
+
+var _moveRuleTargetName = null;
+
+function openMoveRuleDialog(ruleName) {
+  _moveRuleTargetName = ruleName;
+  var rule = _currentRulesData.find(function(r) { return r.Name === ruleName; });
+  if (!rule) return;
+
+  var existingSections = {};
+  _currentRulesData.forEach(function(r) { if (r.Section) existingSections[r.Section] = true; });
+  var sectionSelect = document.getElementById('moveRuleSectionSelect');
+  sectionSelect.innerHTML = Object.keys(existingSections).sort().map(function(s) {
+    var sel = (s === rule.Section) ? 'selected' : '';
+    return '<option value="'+esc(s)+'" '+sel+'>'+esc(s)+'</option>';
+  }).join('') + '<option value="__NEW__">'+esc(t('ac.newSectionOpt'))+'</option>';
+  document.getElementById('moveRuleSectionCustom').style.display = 'none';
+  document.getElementById('moveRuleSectionCustom').value = '';
+
+  populateSubsectionSelect(rule.Section, rule.Subsection);
+
+  document.getElementById('moveRuleOverlay').classList.add('open');
+}
+
+function populateSubsectionSelect(section, currentSub) {
+  var existingSubs = {};
+  _currentRulesData.forEach(function(r) { if (r.Section === section && r.Subsection) existingSubs[r.Subsection] = true; });
+  var subSelect = document.getElementById('moveRuleSubsectionSelect');
+  subSelect.innerHTML = Object.keys(existingSubs).sort().map(function(s) {
+    var sel = (s === currentSub) ? 'selected' : '';
+    return '<option value="'+esc(s)+'" '+sel+'>'+esc(s)+'</option>';
+  }).join('') + '<option value="__NEW__">'+esc(t('ac.newSubsectionOpt'))+'</option>';
+  document.getElementById('moveRuleSubsectionCustom').style.display = 'none';
+  document.getElementById('moveRuleSubsectionCustom').value = '';
+}
+
+function onMoveSectionChange() {
+  var val = document.getElementById('moveRuleSectionSelect').value;
+  var customInput = document.getElementById('moveRuleSectionCustom');
+  if (val === '__NEW__') {
+    customInput.style.display = 'block';
+    customInput.focus();
+    populateSubsectionSelect('__NEW__', null);
+  } else {
+    customInput.style.display = 'none';
+    populateSubsectionSelect(val, null);
+  }
+}
+
+function onMoveSubsectionChange() {
+  var val = document.getElementById('moveRuleSubsectionSelect').value;
+  var customInput = document.getElementById('moveRuleSubsectionCustom');
+  customInput.style.display = (val === '__NEW__') ? 'block' : 'none';
+  if (val === '__NEW__') customInput.focus();
+}
+
+function closeMoveRuleDialog() {
+  document.getElementById('moveRuleOverlay').classList.remove('open');
+  _moveRuleTargetName = null;
+}
+
+function confirmMoveRule() {
+  if (!_moveRuleTargetName) return;
+  var sectionVal = document.getElementById('moveRuleSectionSelect').value;
+  var section = (sectionVal === '__NEW__') ? document.getElementById('moveRuleSectionCustom').value.trim() : sectionVal;
+  var subVal = document.getElementById('moveRuleSubsectionSelect').value;
+  var sub = (subVal === '__NEW__') ? document.getElementById('moveRuleSubsectionCustom').value.trim() : subVal;
+
+  if (!section || !sub) {
+    showToast(t('ac.specifySection'));
+    return;
+  }
+
+  syncRulesFromDom();
+  var rule = _currentRulesData.find(function(r) { return r.Name === _moveRuleTargetName; });
+  if (rule) {
+    rule.Section = section;
+    rule.Subsection = sub;
+  }
+
+  _rulesDirty = true;
+  closeMoveRuleDialog();
+  renderRulesUI(_currentRulesData);
+  showToast('↔️ ' + t('ac.ruleMoved'));
+}
+
+function toggleAddCustomRuleForm() {
+  var form = document.getElementById('addCustomRuleForm');
+  if (form) form.style.display = (form.style.display === 'none') ? 'block' : 'none';
+}
+
+// "Regel" = kurze Stilregel (nur Beschreibung), "Prompt" = eigene Prüfanweisung.
+// Früher bekam jede eigene Regel einen CustomPrompt und wurde damit immer als
+// Prompt behandelt - die Auswahl hatte keine Wirkung.
+function onRuleKindChange(selectEl) {
+  var promptEl = document.getElementById('newRulePrompt');
+  if (promptEl) promptEl.style.display = (selectEl.value === 'RULE') ? 'none' : '';
+  var scopeEl = document.getElementById('newRuleScopeWrap');
+  if (scopeEl) scopeEl.style.display = (selectEl.value === 'RULE') ? 'none' : '';
+}
+
+function onCategorySelectChange(selectEl) {
+  var customInput = document.getElementById('newRuleCustomGroup');
+  if (selectEl.value === '__NEW__') {
+    customInput.style.display = 'block';
+    customInput.focus();
+  } else {
+    customInput.style.display = 'none';
+  }
+}
+
+function addNewCustomRule() {
+  var groupSelect = document.getElementById('newRuleGroupSelect').value;
+  var customGroup = document.getElementById('newRuleCustomGroup').value.trim();
+  var kind = document.getElementById('newRuleKind').value;
+  var name = document.getElementById('newRuleName').value.trim();
+  var desc = document.getElementById('newRuleDesc').value.trim();
+  var prompt = document.getElementById('newRulePrompt').value.trim();
+  var refUrl = document.getElementById('newRuleRefUrl').value.trim();
+  var scope = document.getElementById('newRuleScope').value;
+  
+  var finalGroup = (groupSelect === '__NEW__') ? customGroup : groupSelect;
+  if (!finalGroup) {
+    showToast(t('ac.selectGroupToast'));
+    return;
+  }
+  if (!name || !desc) {
+    showToast(t('ac.titleDescToast'));
+    return;
+  }
+
+  // Eindeutiger Name: früher überschrieben sich Regeln mit gleichem Titel (oder
+  // Titeln nur aus Sonderzeichen, z.B. Chinesisch) gegenseitig.
+  var baseName = "CUSTOM_" + (name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/^_+|_+$/g, '') || 'RULE');
+  var ruleName = baseName, n = 2;
+  while (_currentRulesData.some(function(r) { return r.Name === ruleName; })) ruleName = baseName + '_' + (n++);
+
+  syncRulesFromDom();
+  var newRule = {
+    "Name": ruleName,
+    "Description": desc,
+    "Type": finalGroup,
+    "Section": "Custom",
+    "Subsection": finalGroup,
+    "RuleKind": kind,
+    "CustomPrompt": kind === 'PROMPT' ? (prompt || desc) : '',
+    "PromptScope": kind === 'PROMPT' && scope === 'DOCUMENT' ? 'DOCUMENT' : '',
+    "ReferenceUrl": refUrl || null,
+    "IsEnabled": true,
+    "IsConfigurable": false,
+    "Parameter": "-1"
+  };
+
+  _currentRulesData.push(newRule);
+  _pendingNewCustomRules.push(newRule);
+  _rulesDirty = true;
+  renderRulesUI(_currentRulesData);
+  showToast('➕ ' + t('ac.ruleAdded'));
+}
+
+function saveRulesSettings() {
+  syncRulesFromDom();
+  var updatedRules = _currentRulesData;
+  var btn = document.querySelector('#rulesModal .modal-foot .btn-check');
+  btn.innerText = t('ac.saving');
+  btn.disabled = true;
+  google.script.run
+    .withSuccessHandler(function() {
+      _rulesDirty = false;
+      showToast('💾 ' + t('ac.saved'));
+      // Erst protokollieren, DANN schließen: früher wurde das Popup vorher
+      // geschlossen, der Protokoll-Aufruf ging dabei ggf. verloren.
+      // Herkunft (Formular/Import) nur fürs Log mitschicken, nicht speichern.
+      var pending = _pendingNewCustomRules.map(function(r) {
+        var c = {}; for (var k in r) c[k] = r[k];
+        c.Origin = _importedRules.indexOf(r) !== -1 ? 'Import' : 'Custom';
+        return c;
+      });
+      _pendingNewCustomRules = [];
+      var finish = function(delay){ setTimeout(closeRulesSettings, delay || 600); };
+      if (!pending.length) { finish(); return; }
+      google.script.run
+        .withSuccessHandler(function(res) {
+          res = res || {};
+          if (res.error) { showToast('⚠️ ' + t('ac.logError', { msg: res.error })); finish(4000); return; }
+          showToast('📝 ' + t('ac.logged', { n: res.logged || 0, d: res.duplicates || 0 }));
+          finish(2500);
+        })
+        .withFailureHandler(function(err) {
+          showToast('⚠️ ' + t('ac.logError', { msg: err && err.message ? err.message : String(err) }));
+          finish(4000);
+        })
+        .apiLogNewCustomRules(pending, _currentRulesLang);
+    })
+    .withFailureHandler(function(err) {
+      btn.innerText = t('ac.save');
+      btn.disabled = false;
+      showToast('⚠️ ' + t('ac.saveError', { msg: errText(err) }));
+    })
+    .apiSaveRulesConfig(updatedRules, _currentRulesLang);
+}
+function exportAllRulesToLogSheet() {
+  if (!confirm(t('ac.confirmExportLog', { n: _currentRulesData.length }))) return;
+  showToast(t('ac.exportingLog'));
+  google.script.run
+    .withSuccessHandler(function(res) {
+      showToast('✅ ' + t('ac.exportedLog', { n: res.exported }));
+    })
+    .withFailureHandler(function(err) {
+      showToast('⚠️ ' + t('ac.error', { msg: errText(err) }));
+    })
+    .apiExportAllRulesToLogSheet(_currentRulesData, _currentRulesLang);
+}
+
+function exportRulesOverview() {
+  syncRulesFromDom();
+  showToast('📊 ' + t('ac.buildingOverview'));
+  google.script.run
+    .withSuccessHandler(function(url) {
+      openUrlOrOffer(url, '📊 ' + t('ac.overviewReady'));
+    })
+    .withFailureHandler(function(err) {
+      showToast('⚠️ ' + t('ac.error', { msg: errText(err) }));
+    })
+    .apiExportRulesOverview(_currentRulesData);
+}
+
+function exportRulesToDrive() {
+  syncRulesFromDom();
+  showToast('📤 ' + t('ac.exportingDrive'));
+  google.script.run
+    .withSuccessHandler(function(res) {
+      showLinkToast('📤 ' + t('ac.jsonExported', { name: res.name }), res.url);
+    })
+    .withFailureHandler(function(err) {
+      showToast('⚠️ ' + t('ac.exportError', { msg: errText(err) }));
+    })
+    .apiExportRulesToDrive(_currentRulesData, _currentRulesLang);
+}
+
+// Eigene Regel = Name beginnt mit CUSTOM_ (nur diese lädt der Server aus der
+// Regeldatei wieder; Standardregeln kommen aus Rules.gs).
+function isCustomRule(r) { return !!(r && typeof r.Name === 'string' && r.Name.indexOf('CUSTOM_') === 0); }
+
+var RULE_TYPES = ['Style', 'Grammar', 'Spelling', 'Terminology', 'Abbreviation'];
+
+// Eine importierte Regel übernehmen:
+//  - Name einer vorhandenen STANDARDregel: nur an/aus, Wert und Kategorie
+//    übernehmen (Beschreibung usw. bleiben wie ausgeliefert) - keine Dublette.
+//  - sonst: als EIGENE Regel (Name mit CUSTOM_, Kategorie unter "Custom").
+//    Früher wurde jedes importierte Objekt ungeprüft übernommen; Regeln ohne
+//    CUSTOM_-Präfix waren nach dem Speichern verschwunden.
+function importOneRule(imp, SAFE_RULE_NAME, res) {
+  if (!imp || typeof imp !== 'object' || !imp.Name) { res.skipped++; return; }
+  var name = String(imp.Name).trim();
+  var idx = _currentRulesData.findIndex(function(r) { return r.Name === name; });
+  var existing = idx !== -1 ? _currentRulesData[idx] : null;
+
+  if (existing && !isCustomRule(existing)) {
+    if (typeof imp.IsEnabled === 'boolean') existing.IsEnabled = imp.IsEnabled;
+    if (existing.IsConfigurable && imp.Parameter != null &&
+        (existing.AllowedParameterValues || []).map(String).indexOf(String(imp.Parameter)) !== -1) {
+      existing.Parameter = String(imp.Parameter);
+    }
+    if (imp.Section) existing.Section = String(imp.Section).slice(0, 120);
+    if (imp.Subsection) existing.Subsection = String(imp.Subsection).slice(0, 120);
+    res.std++;
+    return;
+  }
+
+  if (!SAFE_RULE_NAME.test(name)) { res.skipped++; return; }
+  var desc = String(imp.Description || '').trim();
+  if (!desc) { res.skipped++; return; }
+  if (!isCustomRule({ Name: name })) {
+    var base = 'CUSTOM_' + (name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/^_+|_+$/g, '') || 'RULE');
+    name = base;
+    for (var n = 2; _currentRulesData.some(function(r) { return r.Name === name; }); n++) name = base + '_' + n;
+    idx = -1;
+  }
+  var kind = imp.RuleKind === 'PROMPT' || imp.RuleKind === 'RULE' ? imp.RuleKind : (imp.CustomPrompt ? 'PROMPT' : 'RULE');
+  var section = String(imp.Section || '').trim().slice(0, 120);
+  // Alle neuen Regeln stehen unter "Custom" (bzw. "Custom: <Kategorie>").
+  if (!/^Custom\b/i.test(section)) section = section ? 'Custom: ' + section : 'Custom';
+  var rule = {
+    Name: name,
+    Description: desc.slice(0, 1000),
+    Type: RULE_TYPES.indexOf(imp.Type) !== -1 ? imp.Type : 'Style',
+    RuleKind: kind,
+    // Lange Prüfanweisungen (z. B. Cross-Check über das ganze Dokument) nicht abschneiden.
+    CustomPrompt: kind === 'PROMPT' ? String(imp.CustomPrompt || desc).slice(0, 50000) : '',
+    PromptScope: kind === 'PROMPT' && imp.PromptScope === 'DOCUMENT' ? 'DOCUMENT' : '',
+    Section: section,
+    Subsection: String(imp.Subsection || 'General').trim().slice(0, 120) || 'General',
+    ReferenceUrl: safeHref(imp.ReferenceUrl) || null,
+    IsEnabled: imp.IsEnabled !== false,
+    IsConfigurable: false,
+    Parameter: '-1',
+    AllowedParameterValues: []
+  };
+  // Auch bereits vorhandene (gleichnamige) Regeln ans Log schicken: der Server
+  // trägt nur ein, was dort noch nicht steht (gleiche Sprache, Name, Beschreibung).
+  // Früher kamen nur neue Namen ins Log - ein erneuter Import blieb unsichtbar.
+  if (idx !== -1) {
+    var old = _currentRulesData[idx];
+    _currentRulesData[idx] = rule; res.updated++;
+    _pendingNewCustomRules = _pendingNewCustomRules.filter(function(p) { return p !== old; });
+  } else { _currentRulesData.push(rule); res.added++; }
+  _importedRules.push(rule);
+  _pendingNewCustomRules.push(rule);
+}
+
+// Was beim Löschen einer Kategorie passiert: eigene Regeln werden gelöscht,
+// dorthin verschobene Standardregeln kommen in ihre ursprüngliche Kategorie zurück.
+function sectionDeleteInfo(section) {
+  var info = { custom: 0, moved: 0 };
+  _currentRulesData.forEach(function(r) {
+    if ((r.Section || r.Type || 'Other') !== section) return;
+    if (isCustomRule(r)) info.custom++;
+    else if (r.DefaultSection && r.DefaultSection !== section) info.moved++;
+  });
+  return info;
+}
+
+function deleteRuleSection(section) {
+  syncRulesFromDom();
+  var info = sectionDeleteInfo(section);
+  if (!confirm(t('ac.confirmDeleteSection', { name: section, n: info.custom, m: info.moved }))) return;
+  _currentRulesData = _currentRulesData.filter(function(r) {
+    if ((r.Section || r.Type || 'Other') !== section) return true;
+    if (isCustomRule(r)) return false;
+    if (r.DefaultSection) { r.Section = r.DefaultSection; r.Subsection = r.DefaultSubsection; }
+    return true;
+  });
+  _pendingNewCustomRules = _pendingNewCustomRules.filter(function(p) { return _currentRulesData.indexOf(p) !== -1; });
+  _rulesDirty = true;
+  renderRulesUI(_currentRulesData);
+  showToast('🗑️ ' + t('ac.deleted'));
+}
+
+function deleteCustomRule(name) {
+  syncRulesFromDom();
+  var rule = _currentRulesData.find(function(r) { return r.Name === name; });
+  if (!rule || !isCustomRule(rule)) return;
+  if (!confirm(t('ac.confirmDeleteRule', { name: rule.Description }))) return;
+  _currentRulesData = _currentRulesData.filter(function(r) { return r !== rule; });
+  _pendingNewCustomRules = _pendingNewCustomRules.filter(function(p) { return p !== rule; });
+  _rulesDirty = true;
+  renderRulesUI(_currentRulesData);
+  showToast('🗑️ ' + t('ac.deleted'));
+}
+
+// Auslieferungszustand der aktuellen Regelsprache: ohne eigene Regeln, alle
+// Standardregeln an/aus, Kategorie und Wert wie ausgeliefert. Wird sofort gespeichert.
+function restoreDefaultRules() {
+  if (!confirm(t('ac.confirmRestore', { lang: langName(_currentRulesLang, _currentRulesLang) }))) return;
+  showToast('⏳ ' + t('ac.saving'));
+  google.script.run
+    .withSuccessHandler(function(rules) {
+      _currentRulesData = rules;
+      _pendingNewCustomRules = [];
+      _rulesDirty = false;
+      renderRulesUI(rules);
+      showToast('♻️ ' + t('ac.restored'));
+    })
+    .withFailureHandler(function(err) {
+      showToast('⚠️ ' + t('ac.error', { msg: err && err.message ? err.message : String(err) }));
+    })
+    .apiResetRulesConfig(_currentRulesLang);
+}
+
+function importRulesFile(event) {
+  var input = event.target;
+  var file = input.files[0];
+  // Zurücksetzen, damit dieselbe Datei erneut gewählt werden kann (sonst kein change-Event).
+  input.value = '';
+  if (!file) return;
+  syncRulesFromDom();
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var imported = JSON.parse(e.target.result);
+      if (!Array.isArray(imported)) imported = [imported];
+      
+      // Namen aus importierten Dateien (z.B. von einem Kollegen geteilt, siehe Hilfetext)
+      // sind nicht vertrauenswürdig: ein manipuliertes JSON könnte sonst über den Namen
+      // Skript-Code in dieses Sidebar-UI einschleusen. Neue Namen werden daher auf ein
+      // sicheres Muster geprüft; alles andere wird übersprungen statt gerendert.
+      var SAFE_RULE_NAME = /^[A-Za-z0-9_.\- ]{1,100}$/;
+      var res = { std: 0, added: 0, updated: 0, skipped: 0 };
+      imported.forEach(function(imp) { importOneRule(imp, SAFE_RULE_NAME, res); });
+      _rulesDirty = true;
+      renderRulesUI(_currentRulesData);
+      showToast((res.skipped ? '⚠️ ' : '📥 ') + t('ac.importSummary', { std: res.std, added: res.added + res.updated, skipped: res.skipped }));
+    } catch(err) {
+      showToast('⚠️ ' + t('ac.invalidJson'));
+    }
+  };
+  reader.readAsText(file);
+}
+
+function backToHomepage() {
+  google.script.run.apiShowHomeChooser(HOST_APP);
+}
+
+</script>
+</body>
+</html>
