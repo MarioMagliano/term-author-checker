@@ -1052,8 +1052,10 @@ function closeRulesSettings() {
   if (_rulesDirty && !confirm(t('ac.discardChanges'))) return;
   var modalEl = document.getElementById('rulesModal');
   if (modalEl) modalEl.classList.remove('open');
-  // Schließt den Modal-Dialog in Google Docs/Sheets/Slides
-  google.script.host.close();
+  // Schließt den Modal-Dialog in Google Docs/Sheets/Slides; als eigene Seite
+  // (?page=rules, Fenster aus dem Portal) gibt es google.script.host nicht.
+  if (google.script.host && google.script.host.close) google.script.host.close();
+  else window.close();
 }
 
 // Wird beim Initialisieren des Modals aufgerufen

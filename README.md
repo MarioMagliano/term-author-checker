@@ -73,6 +73,7 @@ Danach in Apps Script die Add-on-Bereitstellung und die Web-App-Bereitstellung a
 |---|---|
 | `node test/annotate-flow.cjs` | kompletter Ablauf „kommentierte PDF“ gegen ein simuliertes Drive |
 | `node test/pdf-memory.cjs` | Speicherverbrauch der PDF-Verarbeitung |
+| `node test/rules-page.cjs` | Regel-Popup als eigene Seite (`?page=rules`) im Browser, ohne Docs/Sheets (Playwright nötig) |
 | `node test/browser-api.cjs` | Serverseite der Browser-Prüfung (`PdfBrowserApi.js`) mit Platzhaltern für die Apps-Script-Dienste, echter Gemini-Anfrage- und Antwortcode |
 | `node test/browser-engine.cjs` | PDF-Verarbeitung im Browser (Chromium, Playwright nötig) gegen ein simuliertes Drive, Ergebnis Byte für Byte wie in Apps Script |
 | `node tools/build-pdf-worker.cjs --check` | `PdfWorkerSource.html` ist aktuell |
@@ -122,6 +123,7 @@ Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prom
 - **Gleicher Code:** Der Worker besteht aus denselben Modulen wie Apps Script (`PdfInflate`, `PdfTextPosition`,
   `PdfAnnotate`, `PdfShrink`, `PdfAnnotateSearch`) plus `tools/pdf-worker-main.txt`. Nach jeder Änderung an einem
   Modul `node tools/build-pdf-worker.cjs` ausführen und `PdfWorkerSource.html` mit einchecken.
+- **Regeln als eigene Seite:** `<Web-App-URL>?page=rules` zeigt dasselbe Popup „Rules & Custom Prompts“ wie in Docs, Sheets und Slides, aber in einem Browser-Fenster (Aufruf aus dem Translation-Services-Portal, Reiter [FTS-C]). Die Regeln liegen pro Nutzer, sind also dieselben wie im Add-on.
 - **Noch nicht im Browser-Weg:** Gesamtdokument-Prompts (`DocPrompts.js`). Die Seite zeigt einen Hinweis mit den
   Namen, wenn für die gewählte Sprache welche aktiv sind.
 - **Prompt-Cache:** Der Prompt wird 5 Minuten je Sprache zwischengespeichert (`CacheService`); Regeländerungen
