@@ -1,0 +1,2859 @@
+<!-- Erzeugt von tools/build-pdf-worker.cjs - nicht von Hand ändern. -->
+<script type="text/plain" id="pdf-worker-src">
+// ---- PdfInflate.js ----
+// ============================================================================
+// RAW DEFLATE/ZLIB-INFLATE IN REINEM JS (RFC 1950/1951)
+// ============================================================================
+// Apps Script hat kein eingebautes zlib/raw-inflate (Utilities.ungzip
+// erwartet das GZIP-Containerformat, nicht den in PDF-Streams verwendeten
+// nackten zlib/Deflate-Stream) und keine Möglichkeit, externe Bibliotheken
+// zu laden. PDF-Content-Streams (der Zeichenbefehls-Text jeder Seite) sind
+// so gut wie immer mit /Filter /FlateDecode komprimiert - ohne Inflate kann
+// also nicht ermittelt werden, WO auf einer Seite ein bestimmter Text
+// tatsächlich steht. Diese Datei implementiert Inflate deshalb von Hand,
+// exakt nach RFC 1951 (Deflate) + RFC 1950 (zlib-Hülle drumherum).
+//
+// Wird ausschließlich zum LESEN benutzt (PDF-Struktur/Content-Streams
+// dekomprimieren); erzeugte/angehängte neue Objekte in PdfAnnotate.gs
+// bleiben unkomprimierter Klartext, es wird also nirgends selbst komprimiert.
+
+// Feste Huffman-Codelängen für Block-Typ 1 (RFC 1951 §3.2.6).
+function _inflateBuildFixedTrees_() {
+  var litLens = new Array(288);
+  var i;
+  for (i = 0; i <= 143; i++) litLens[i] = 8;
+  for (i = 144; i <= 255; i++) litLens[i] = 9;
+  for (i = 256; i <= 279; i++) litLens[i] = 7;
+  for (i = 280; i <= 287; i++) litLens[i] = 8;
+  var distLens = new Array(30);
+  for (i = 0; i < 30; i++) distLens[i] = 5;
+  return { lit: _inflateBuildHuffmanTable_(litLens), dist: _inflateBuildHuffmanTable_(distLens) };
+}
+
+// Baut aus einem Array von Codelängen (Index = Symbol) eine Decoder-Tabelle
+// nach dem kanonischen Huffman-Verfahren aus RFC 1951 §3.2.2.
+function _inflateBuildHuffmanTable_(lengths) {
+  var maxBits = 0, i;
+  for (i = 0; i < lengths.length; i++) if (lengths[i] > maxBits) maxBits = lengths[i];
+  var blCount = new Array(maxBits + 1);
+  for (i = 0; i <= maxBits; i++) blCount[i] = 0;
+  for (i = 0; i < lengths.length; i++) if (lengths[i] > 0) blCount[lengths[i]]++;
+  var nextCode = new Array(maxBits + 1);
+  var code = 0;
+  blCount[0] = 0;
+  for (var bits = 1; bits <= maxBits; bits++) {
+    code = (code + blCount[bits - 1]) << 1;
+    nextCode[bits] = code;
+  }
+  // codes[symbol] = {code, len}; wird beim Decodieren linear durchsucht
+  // (Bitweise Lookup-Tabellen wären schneller, aber für PDF-Seitengrößen
+  // reicht das und bleibt einfacher nachvollziehbar/prüfbar).
+  var codes = [];
+  for (var sym = 0; sym < lengths.length; sym++) {
+    var len = lengths[sym];
+    if (len > 0) {
+      codes.push({ symbol: sym, code: nextCode[len], len: len });
+      nextCode[len]++;
+    }
+  }
+  // Nach Länge gruppiert für schnelleres Decodieren.
+  var byLen = {};
+  codes.forEach(function(c) {
+    if (!byLen[c.len]) byLen[c.len] = {};
+    byLen[c.len][c.code] = c.symbol;
+  });
+  return { byLen: byLen, maxBits: maxBits };
+}
+
+function _InflateBitReader_(bytes, startByteOffset) {
+  this.bytes = bytes;
+  this.pos = startByteOffset; // Byte-Index
+  this.bitBuf = 0;
+  this.bitCount = 0;
+}
+_InflateBitReader_.prototype.getBit = function() {
+  if (this.bitCount === 0) {
+    var b = this.bytes[this.pos++];
+    if (b === undefined) throw new Error('Unexpected end of DEFLATE stream.');
+    this.bitBuf = b < 0 ? b + 256 : b;
+    this.bitCount = 8;
+  }
+  var bit = this.bitBuf & 1;
+  this.bitBuf >>= 1;
+  this.bitCount--;
+  return bit;
+};
+_InflateBitReader_.prototype.getBits = function(n) {
+  var v = 0;
+  for (var i = 0; i < n; i++) v |= this.getBit() << i;
+  return v;
+};
+_InflateBitReader_.prototype.alignToByte = function() {
+  this.bitBuf = 0;
+  this.bitCount = 0;
+};
+// Decodiert genau ein Symbol per kanonischer Huffman-Tabelle, MSB-first
+// akkumuliert (Huffman-Codes werden in DEFLATE bitweise MSB-first gelesen,
+// im Unterschied zu den LSB-first gepackten "normalen" Werten wie extra bits).
+_InflateBitReader_.prototype.readSymbol = function(table) {
+  var code = 0;
+  for (var len = 1; len <= table.maxBits; len++) {
+    code = (code << 1) | this.getBit();
+    var group = table.byLen[len];
+    if (group && Object.prototype.hasOwnProperty.call(group, code)) {
+      return group[code];
+    }
+  }
+  throw new Error('Invalid Huffman code in DEFLATE stream.');
+};
+
+var INFLATE_LENGTH_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+var INFLATE_LENGTH_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+var INFLATE_DIST_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+var INFLATE_DIST_EXTRA = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+var INFLATE_CLCODE_ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+
+/**
+ * Raw DEFLATE (RFC 1951) decoder. bytes: signed byte array. Returns a plain
+ * array of unsigned byte values (0..255).
+ */
+function inflateRaw_(bytes, startByteOffset) {
+  var reader = new _InflateBitReader_(bytes, startByteOffset || 0);
+  var out = [];
+  var fixedTrees = null;
+  var final = 0;
+  do {
+    final = reader.getBit();
+    var type = reader.getBits(2);
+    if (type === 0) {
+      reader.alignToByte();
+      var len = (reader.bytes[reader.pos] < 0 ? reader.bytes[reader.pos] + 256 : reader.bytes[reader.pos]) |
+                ((reader.bytes[reader.pos + 1] < 0 ? reader.bytes[reader.pos + 1] + 256 : reader.bytes[reader.pos + 1]) << 8);
+      reader.pos += 4; // LEN (2 bytes) + NLEN (2 bytes, ones' complement, ignored)
+      for (var s = 0; s < len; s++) {
+        var b = reader.bytes[reader.pos++];
+        out.push(b < 0 ? b + 256 : b);
+      }
+    } else if (type === 1 || type === 2) {
+      var trees;
+      if (type === 1) {
+        if (!fixedTrees) fixedTrees = _inflateBuildFixedTrees_();
+        trees = fixedTrees;
+      } else {
+        trees = _inflateReadDynamicTrees_(reader);
+      }
+      _inflateDecodeBlock_(reader, trees.lit, trees.dist, out);
+    } else {
+      throw new Error('Invalid DEFLATE block type (corrupt or unsupported stream).');
+    }
+  } while (!final);
+  return out;
+}
+
+function _inflateReadDynamicTrees_(reader) {
+  var hlit = reader.getBits(5) + 257;
+  var hdist = reader.getBits(5) + 1;
+  var hclen = reader.getBits(4) + 4;
+
+  var clLens = new Array(19);
+  for (var i = 0; i < 19; i++) clLens[i] = 0;
+  for (i = 0; i < hclen; i++) clLens[INFLATE_CLCODE_ORDER[i]] = reader.getBits(3);
+  var clTable = _inflateBuildHuffmanTable_(clLens);
+
+  var lens = [];
+  while (lens.length < hlit + hdist) {
+    var sym = reader.readSymbol(clTable);
+    if (sym <= 15) {
+      lens.push(sym);
+    } else if (sym === 16) {
+      var repeat = reader.getBits(2) + 3;
+      var prev = lens[lens.length - 1];
+      for (var r = 0; r < repeat; r++) lens.push(prev);
+    } else if (sym === 17) {
+      var repeat0 = reader.getBits(3) + 3;
+      for (var r2 = 0; r2 < repeat0; r2++) lens.push(0);
+    } else { // 18
+      var repeat00 = reader.getBits(7) + 11;
+      for (var r3 = 0; r3 < repeat00; r3++) lens.push(0);
+    }
+  }
+  var litLens = lens.slice(0, hlit);
+  var distLens = lens.slice(hlit, hlit + hdist);
+  return { lit: _inflateBuildHuffmanTable_(litLens), dist: _inflateBuildHuffmanTable_(distLens) };
+}
+
+function _inflateDecodeBlock_(reader, litTable, distTable, out) {
+  for (;;) {
+    var sym = reader.readSymbol(litTable);
+    if (sym < 256) {
+      out.push(sym);
+    } else if (sym === 256) {
+      return; // Block-Ende
+    } else {
+      var lenIdx = sym - 257;
+      var length = INFLATE_LENGTH_BASE[lenIdx] + reader.getBits(INFLATE_LENGTH_EXTRA[lenIdx]);
+      var distSym = reader.readSymbol(distTable);
+      var distance = INFLATE_DIST_BASE[distSym] + reader.getBits(INFLATE_DIST_EXTRA[distSym]);
+      var start = out.length - distance;
+      if (start < 0) throw new Error('Invalid back-reference distance in DEFLATE stream.');
+      for (var k = 0; k < length; k++) out.push(out[start + k]);
+    }
+  }
+}
+
+/**
+ * zlib-Wrapper (RFC 1950) um inflateRaw_: überspringt den 2-Byte-Header
+ * (CMF/FLG) und die 4-Byte-Adler32-Prüfsumme am Ende wird ignoriert (kein
+ * Sicherheitsproblem - wir lesen nur, um Textpositionen zu finden; ein
+ * Prüfsummenfehler würde ohnehin schon beim Huffman-Decodieren selbst als
+ * Exception auffallen).
+ */
+function inflateZlib_(bytes) {
+  return inflateRaw_(bytes, 2);
+}
+// ---- PdfTextPosition.js ----
+// ============================================================================
+// TEXTPOSITION IN EINER PDF-SEITE FINDEN (für exakt platzierte Notizen)
+// ============================================================================
+// Baut auf PdfInflate.gs auf: dekomprimiert den Content-Stream jeder Seite
+// (die Zeichenbefehle, die bestimmen, welcher Text WO auf der Seite steht) und
+// interpretiert die textbezogenen PDF-Operatoren inklusive der Schriften:
+//
+//  - ToUnicode-CMaps / Encodings (/Differences, WinAnsi) werden ausgewertet,
+//    damit auch PDFs mit eingebetteten CID-Schriften (Type0/Identity-H - so
+//    gut wie jedes PDF aus Word, InDesign, Chrome, LibreOffice ...) lesbaren
+//    Text liefern. Ohne das bestehen die Textausgaben nur aus Glyph-Nummern
+//    und kein Zitat kann gefunden werden.
+//  - Zeichenbreiten (/Widths, /W, Standard-14-Metriken) werden pro Glyph
+//    mitgerechnet, sodass für JEDES Zeichen ein Rechteck im Seitenraum
+//    bekannt ist - nicht nur die Höhe der Zeile.
+//  - Form-XObjects (Do) und Objekte in komprimierten Object Streams werden
+//    ebenfalls gelesen.
+//
+// Das von Gemini zitierte "original" wird im so rekonstruierten Seitentext
+// gesucht; das Ergebnis sind die Rechtecke (eins pro Textzeile) exakt um die
+// betroffenen Wörter, die in PdfAnnotate.gs als Highlight-Annotation
+// geschrieben werden.
+//
+// Alles hier ist eine Verbesserung "on top": nicht unterstützte Konstrukte
+// (z.B. LZW-komprimierte Streams) führen zu einem sauberen "kein Treffer",
+// nie zu falschen Koordinaten - die Notiz landet dann wie bisher oben links
+// auf der von Gemini genannten Seite (siehe DriveAddon.gs).
+
+// ─── 2D-AFFINE MATRIX-HILFSFUNKTIONEN (PDF: [a b c d e f], Zeilenvektoren) ──
+function _pdfMatIdentity_() { return [1, 0, 0, 1, 0, 0]; }
+// "A dann B": kombinierte Matrix, als würde erst A und danach B angewendet.
+function _pdfMatMul_(A, B) {
+  return [
+    A[0] * B[0] + A[1] * B[2],
+    A[0] * B[1] + A[1] * B[3],
+    A[2] * B[0] + A[3] * B[2],
+    A[2] * B[1] + A[3] * B[3],
+    A[4] * B[0] + A[5] * B[2] + B[4],
+    A[4] * B[1] + A[5] * B[3] + B[5]
+  ];
+}
+// Position des Textursprungs (0,0 in Textraum) nach Anwendung von M im Seitenraum.
+
+// ─── STREAM-BYTES EINES OBJEKTS LADEN (Dict + Rohdaten) ────────────────────
+function _pdfGetStreamData_(text, offsets, objNum) {
+  if (!(objNum in offsets)) return null;
+  var range = _pdfExtractDictText_(text, offsets[objNum]);
+  if (!range) return null;
+  var dictText = text.slice(range.start, range.end);
+
+  var streamKwIdx = text.indexOf('stream', range.end);
+  if (streamKwIdx === -1) return null;
+  var dataStart = streamKwIdx + 6;
+  if (text.charAt(dataStart) === '\r') dataStart++;
+  if (text.charAt(dataStart) === '\n') dataStart++;
+
+  var lengthM = /\/Length\s+(\d+)\b(?!\s+\d+\s+R)/.exec(dictText);
+  var dataEnd;
+  if (lengthM) {
+    dataEnd = dataStart + parseInt(lengthM[1], 10);
+  } else {
+    var endIdx = text.indexOf('endstream', dataStart);
+    if (endIdx === -1) return null;
+    dataEnd = endIdx;
+    while (dataEnd > dataStart && (text.charAt(dataEnd - 1) === '\n' || text.charAt(dataEnd - 1) === '\r')) dataEnd--;
+  }
+
+  var rawSlice = text.slice(dataStart, dataEnd);
+  var rawBytes = new Array(rawSlice.length);
+  for (var i = 0; i < rawSlice.length; i++) {
+    var code = rawSlice.charCodeAt(i) & 0xFF;
+    rawBytes[i] = code > 127 ? code - 256 : code;
+  }
+
+  var filterM = /\/Filter\s*\/(\w+)/.exec(dictText);
+  var filterArrM = /\/Filter\s*\[([\s\S]*?)\]/.exec(dictText);
+  var filters = [];
+  if (filterM) filters.push(filterM[1]);
+  else if (filterArrM) {
+    var fm = /\/(\w+)/g, fmatch;
+    while ((fmatch = fm.exec(filterArrM[1]))) filters.push(fmatch[1]);
+  }
+
+  return { dictText: dictText, rawBytes: rawBytes, filters: filters };
+}
+
+// ASCII85 (PDF-Variante, Ende "~>", "z" = 4 Nullbytes). Ein-/Ausgabe: signed Bytes.
+function _pdfDecodeAscii85_(bytes) {
+  var out = [];
+  var group = [];
+  function flush(n) {
+    var v = 0;
+    for (var k = 0; k < 5; k++) v = v * 85 + (k < group.length ? group[k] : 84);
+    var b = [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+    for (var j = 0; j < n; j++) out.push(b[j] > 127 ? b[j] - 256 : b[j]);
+    group = [];
+  }
+  for (var i = 0; i < bytes.length; i++) {
+    var c = bytes[i] & 0xFF;
+    if (c === 0x7E) break;                          // "~>" = Ende
+    if (c <= 0x20) continue;                        // Whitespace
+    if (c === 0x7A && group.length === 0) { out.push(0, 0, 0, 0); continue; } // "z"
+    if (c < 0x21 || c > 0x75) throw new Error('Invalid ASCII85 data.');
+    group.push(c - 33);
+    if (group.length === 5) flush(4);
+  }
+  if (group.length) flush(group.length - 1);
+  return out;
+}
+
+function _pdfDecodeAsciiHex_(bytes) {
+  var hex = '';
+  for (var i = 0; i < bytes.length; i++) {
+    var ch = String.fromCharCode(bytes[i] & 0xFF);
+    if (ch === '>') break;
+    if (/[0-9a-fA-F]/.test(ch)) hex += ch;
+  }
+  if (hex.length % 2) hex += '0';
+  var out = [];
+  for (var j = 0; j < hex.length; j += 2) {
+    var b = parseInt(hex.substr(j, 2), 16);
+    out.push(b > 127 ? b - 256 : b);
+  }
+  return out;
+}
+
+// Dekomprimiert einen Stream zu Klartext (Binärstring, 1 Zeichen = 1 Byte).
+// Wirft, wenn ein nicht unterstützter Filter benutzt wird - Aufrufer fängt das ab.
+function _pdfDecodeStreamToText_(streamData) {
+  var bytes = streamData.rawBytes;
+  streamData.filters.forEach(function(f) {
+    if (f === 'FlateDecode' || f === 'Fl') {
+      bytes = inflateZlib_(bytes).map(function(b) { return b > 127 ? b - 256 : b; });
+    } else if (f === 'ASCII85Decode' || f === 'A85') {
+      // z.B. von ReportLab erzeugte PDFs: [/ASCII85Decode /FlateDecode]
+      bytes = _pdfDecodeAscii85_(bytes);
+    } else if (f === 'ASCIIHexDecode' || f === 'AHx') {
+      bytes = _pdfDecodeAsciiHex_(bytes);
+    } else {
+      throw new Error('Unsupported stream filter: ' + f);
+    }
+  });
+  return _pdfBytesToBinaryString_(bytes);
+}
+
+
+// ─── STRING-LITERALE (Content-Streams und Objekte) ─────────────────────────
+// Liest einen literalen String "(...)" inkl. Escapes/verschachtelter Klammern,
+// beginnend bei text[i] === '('. Gibt {value, next} zurück.
+function _pdfReadLiteralString_(text, i) {
+  var depth = 0, out = [];
+  do {
+    var ch = text.charAt(i);
+    if (ch === '\\') {
+      var next = text.charAt(i + 1);
+      if (next === 'n') { out.push('\n'); i += 2; }
+      else if (next === 'r') { out.push('\r'); i += 2; }
+      else if (next === 't') { out.push('\t'); i += 2; }
+      else if (next === 'b' || next === 'f') { i += 2; }
+      else if (next === '\n') { i += 2; }
+      else if (next === '\r') { i += 2; if (text.charAt(i) === '\n') i++; }
+      else if (/[0-7]/.test(next)) {
+        var oct = next; i += 2;
+        for (var k = 0; k < 2 && /[0-7]/.test(text.charAt(i)); k++) { oct += text.charAt(i); i++; }
+        out.push(String.fromCharCode(parseInt(oct, 8) & 0xFF));
+      } else { out.push(next); i += 2; }
+      continue;
+    }
+    if (ch === '(') { depth++; if (depth > 1) out.push(ch); i++; continue; }
+    if (ch === ')') { depth--; if (depth > 0) out.push(ch); i++; continue; }
+    out.push(ch); i++;
+  } while (depth > 0 && i < text.length);
+  return { value: out.join(''), next: i };
+}
+
+function _pdfReadHexString_(text, i) {
+  var end = text.indexOf('>', i);
+  if (end === -1) end = text.length;
+  var hex = text.slice(i + 1, end).replace(/\s+/g, '');
+  if (hex.length % 2) hex += '0';
+  var out = [];
+  for (var k = 0; k < hex.length; k += 2) out.push(String.fromCharCode(parseInt(hex.substr(k, 2), 16) || 0));
+  return { value: out.join(''), next: end + 1 };
+}
+
+// ─── MINIMALER PDF-OBJEKTPARSER ────────────────────────────────────────────
+// Werte-Darstellung: Zahl -> number, Name -> {n}, String -> {s} (Bytes als
+// Binärstring), Array -> Array, Dictionary -> {d: {...}}, Referenz -> {r},
+// Operator/Schlüsselwort (nur in Content-Streams) -> {op}.
+function _pdfIsWs_(c) { return c === 32 || c === 10 || c === 13 || c === 9 || c === 12 || c === 0; }
+function _pdfIsDelim_(c) {
+  return c === 40 || c === 41 || c === 60 || c === 62 || c === 91 || c === 93 ||
+         c === 123 || c === 125 || c === 47 || c === 37;
+}
+
+function _pdfSkipWs_(s, i) {
+  var n = s.length;
+  while (i < n) {
+    var c = s.charCodeAt(i);
+    if (_pdfIsWs_(c)) { i++; continue; }
+    if (c === 37) { while (i < n && s.charCodeAt(i) !== 10 && s.charCodeAt(i) !== 13) i++; continue; }
+    break;
+  }
+  return i;
+}
+
+var _PDF_REF_RE_ = /\s+(\d+)\s+R(?![^\s\/\[\]<>()%])/y;
+
+// Liest einen Wert ab Position i. allowRefs: "N G R" als Referenz erkennen
+// (in Content-Streams gibt es keine Referenzen).
+function _pdfParseValue_(s, i, allowRefs) {
+  i = _pdfSkipWs_(s, i);
+  var n = s.length;
+  if (i >= n) return { v: undefined, next: n };
+  var c = s.charCodeAt(i);
+
+  if (c === 40) { // (
+    var lit = _pdfReadLiteralString_(s, i);
+    return { v: { s: lit.value }, next: lit.next };
+  }
+  if (c === 60) { // <
+    if (s.charCodeAt(i + 1) === 60) {
+      var d = {};
+      i += 2;
+      while (true) {
+        i = _pdfSkipWs_(s, i);
+        if (i >= n) break;
+        if (s.charCodeAt(i) === 62 && s.charCodeAt(i + 1) === 62) { i += 2; break; }
+        var key = _pdfParseValue_(s, i, allowRefs);
+        if (key.next <= i) { i++; continue; }
+        if (!key.v || key.v.n === undefined) { i = key.next; continue; } // defekter Eintrag: überspringen
+        var val = _pdfParseValue_(s, key.next, allowRefs);
+        d[key.v.n] = val.v;
+        i = val.next;
+      }
+      return { v: { d: d }, next: i };
+    }
+    var hx = _pdfReadHexString_(s, i);
+    return { v: { s: hx.value }, next: hx.next };
+  }
+  if (c === 91) { // [
+    var arr = [];
+    i++;
+    while (true) {
+      i = _pdfSkipWs_(s, i);
+      if (i >= n) break;
+      if (s.charCodeAt(i) === 93) { i++; break; }
+      var el = _pdfParseValue_(s, i, allowRefs);
+      if (el.next <= i) { i++; continue; }
+      if (el.v !== undefined && !(el.v && el.v.op !== undefined)) arr.push(el.v);
+      i = el.next;
+    }
+    return { v: arr, next: i };
+  }
+  if (c === 47) { // /Name
+    var j = i + 1;
+    while (j < n) { var cj = s.charCodeAt(j); if (_pdfIsWs_(cj) || _pdfIsDelim_(cj)) break; j++; }
+    var name = s.slice(i + 1, j).replace(/#([0-9A-Fa-f]{2})/g, function(m, h) { return String.fromCharCode(parseInt(h, 16)); });
+    return { v: { n: name }, next: j };
+  }
+  if ((c >= 48 && c <= 57) || c === 43 || c === 45 || c === 46) {
+    var j2 = i + 1, isInt = c !== 46;
+    while (j2 < n) {
+      var c2 = s.charCodeAt(j2);
+      if (c2 >= 48 && c2 <= 57) { j2++; continue; }
+      if (c2 === 46) { isInt = false; j2++; continue; }
+      break;
+    }
+    var num = parseFloat(s.slice(i, j2));
+    if (isNaN(num)) num = 0;
+    if (allowRefs && isInt && c !== 43 && c !== 45) {
+      _PDF_REF_RE_.lastIndex = j2;
+      var rm = _PDF_REF_RE_.exec(s);
+      if (rm) return { v: { r: num }, next: _PDF_REF_RE_.lastIndex };
+    }
+    return { v: num, next: j2 };
+  }
+  // Schlüsselwort / Operator
+  var k = i;
+  while (k < n) { var ck = s.charCodeAt(k); if (_pdfIsWs_(ck) || _pdfIsDelim_(ck)) break; k++; }
+  if (k === i) return { v: undefined, next: i + 1 }; // verirrtes ")", ">", "{" ...
+  var word = s.slice(i, k);
+  if (word === 'true') return { v: true, next: k };
+  if (word === 'false') return { v: false, next: k };
+  if (word === 'null') return { v: null, next: k };
+  return { v: { op: word }, next: k };
+}
+
+// ─── DOKUMENT-ZUGRIFF (Objekte auflösen, auch aus Object Streams) ─────────
+function _pdfOpenDoc_(text, offsets) {
+  return { text: text, offsets: offsets, objCache: {}, streamCache: {}, objStm: null, fontCache: {} };
+}
+
+function _pdfDocObjStmIndex_(doc) {
+  if (doc.objStm) return doc.objStm;
+  var index = {};
+  var t = doc.text;
+  var re = /\/Type\s*\/ObjStm\b/g, m;
+  while ((m = re.exec(t))) {
+    var objIdx = t.lastIndexOf('obj', m.index);
+    if (objIdx === -1) continue;
+    var head = /(\d+)\s+\d+\s+$/.exec(t.slice(Math.max(0, objIdx - 24), objIdx));
+    if (!head) continue;
+    try {
+      var sd = _pdfGetStreamData_(t, doc.offsets, parseInt(head[1], 10));
+      if (!sd) continue;
+      var dec = _pdfDecodeStreamToText_(sd);
+      var nM = /\/N\s+(\d+)/.exec(sd.dictText), fM = /\/First\s+(\d+)/.exec(sd.dictText);
+      if (!nM || !fM) continue;
+      var first = parseInt(fM[1], 10), count = parseInt(nM[1], 10);
+      var nums = dec.slice(0, first).replace(/^\s+|\s+$/g, '').split(/\s+/);
+      for (var k = 0; k + 1 < nums.length && k / 2 < count; k += 2) {
+        index[parseInt(nums[k], 10)] = { text: dec, pos: first + parseInt(nums[k + 1], 10) };
+      }
+    } catch (e) { /* nicht dekodierbarer Object Stream: Objekte darin bleiben unbekannt */ }
+  }
+  doc.objStm = index;
+  return index;
+}
+
+function _pdfDocObj_(doc, num) {
+  if (doc.objCache.hasOwnProperty(num)) return doc.objCache[num];
+  var v;
+  if (doc.offsets.hasOwnProperty(num)) {
+    var p = doc.text.indexOf('obj', doc.offsets[num]);
+    if (p !== -1) v = _pdfParseValue_(doc.text, p + 3, true).v;
+  } else {
+    var loc = _pdfDocObjStmIndex_(doc)[num];
+    if (loc) v = _pdfParseValue_(loc.text, loc.pos, true).v;
+  }
+  if (v === undefined || (v && v.op !== undefined)) v = null;
+  doc.objCache[num] = v;
+  return v;
+}
+
+// Folgt Referenzen, bis ein direkter Wert vorliegt.
+function _pdfDocRes_(doc, v) {
+  for (var guard = 0; v && typeof v === 'object' && v.r !== undefined && guard < 32; guard++) v = _pdfDocObj_(doc, v.r);
+  return v;
+}
+
+function _pdfDocGet_(doc, dict, key) {
+  dict = _pdfDocRes_(doc, dict);
+  if (!dict || !dict.d || !dict.d.hasOwnProperty(key)) return undefined;
+  return _pdfDocRes_(doc, dict.d[key]);
+}
+
+function _pdfNum_(v, dflt) { return typeof v === 'number' ? v : dflt; }
+function _pdfName_(v) { return v && v.n !== undefined ? v.n : null; }
+
+// Dekodierter Inhalt eines Stream-Objekts (per Referenz), oder null.
+function _pdfDocStreamText_(doc, ref) {
+  if (!ref || ref.r === undefined) return null;
+  var num = ref.r;
+  if (doc.streamCache.hasOwnProperty(num)) return doc.streamCache[num];
+  var out = null;
+  try {
+    var sd = _pdfGetStreamData_(doc.text, doc.offsets, num);
+    if (sd) out = _pdfDecodeStreamToText_(sd);
+  } catch (e) {
+    Logger.log('_pdfDocStreamText_: Stream ' + num + ' nicht dekodierbar: ' + e.message);
+  }
+  doc.streamCache[num] = out;
+  return out;
+}
+
+// ─── SCHRIFTEN: CODE -> UNICODE + BREITE ──────────────────────────────────
+// Breiten der Standard-14-Schriften (Codes 32..255 in WinAnsi, 1/1000 em; 0 = unbekannt) für PDFs, die
+// eine dieser Schriften ohne /Widths verwenden.
+var _PDF_STD_WIDTHS_ = {
+  'Helvetica': '278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584,0,556,0,222,556,333,1000,556,556,333,1000,667,333,1000,0,611,0,0,222,222,333,333,350,556,1000,333,1000,500,333,944,0,500,667,278,333,556,556,556,556,260,556,333,737,370,556,584,333,737,333,400,584,333,333,333,556,537,278,333,333,365,556,834,834,834,611,667,667,667,667,667,667,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,500,556,556,556,556,278,278,278,278,556,556,556,556,556,556,556,584,611,556,556,556,556,500,556,500',
+  'Helvetica-Bold': '278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584,0,556,0,278,556,500,1000,556,556,333,1000,667,333,1000,0,611,0,0,278,278,500,500,350,556,1000,333,1000,556,333,944,0,500,667,278,333,556,556,556,556,280,556,333,737,370,556,584,333,737,333,400,584,333,333,333,611,556,278,333,333,365,556,834,834,834,611,722,722,722,722,722,722,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,556,556,556,556,556,278,278,278,278,611,611,611,611,611,611,611,584,611,611,611,611,611,556,611,556',
+  'Times-Roman': '250,333,408,500,500,833,778,180,333,333,500,564,250,333,250,278,500,500,500,500,500,500,500,500,500,500,278,278,564,564,564,444,921,722,667,667,722,611,556,722,722,333,389,722,611,889,722,722,556,722,667,556,611,722,722,944,722,722,611,333,278,333,469,500,333,444,500,444,500,444,333,500,500,278,278,500,278,778,500,500,500,500,333,389,278,500,500,722,500,500,444,480,200,480,541,0,500,0,333,500,444,1000,500,500,333,1000,556,333,889,0,611,0,0,333,333,444,444,350,500,1000,333,980,389,333,722,0,444,722,250,333,500,500,500,500,200,500,333,760,276,500,564,333,760,333,400,564,300,300,333,500,453,250,333,300,310,500,750,750,750,444,722,722,722,722,722,722,889,667,611,611,611,611,333,333,333,333,722,722,722,722,722,722,722,564,722,722,722,722,722,722,556,500,444,444,444,444,444,444,667,444,444,444,444,444,278,278,278,278,500,500,500,500,500,500,500,564,500,500,500,500,500,500,500,500',
+  'Times-Bold': '250,333,555,500,500,1000,833,278,333,333,500,570,250,333,250,278,500,500,500,500,500,500,500,500,500,500,333,333,570,570,570,500,930,722,667,722,722,667,611,778,778,389,500,778,667,944,722,778,611,778,722,556,667,722,722,1000,722,722,667,333,278,333,581,500,333,500,556,444,556,444,333,500,556,278,333,556,278,833,556,500,556,556,444,389,333,556,500,722,500,500,444,394,220,394,520,0,500,0,333,500,500,1000,500,500,333,1000,556,333,1000,0,667,0,0,333,333,500,500,350,500,1000,333,1000,389,333,722,0,444,722,250,333,500,500,500,500,220,500,333,747,300,500,570,333,747,333,400,570,300,300,333,556,540,250,333,300,330,500,750,750,750,500,722,722,722,722,722,722,1000,722,667,667,667,667,389,389,389,389,722,722,778,778,778,778,778,570,778,722,722,722,722,722,611,556,500,500,500,500,500,500,722,444,444,444,444,444,278,278,278,278,500,556,500,500,500,500,500,570,500,556,556,556,556,500,556,500'
+};
+
+function _pdfStdWidthsFor_(baseFont) {
+  var b = String(baseFont || '').replace(/^[A-Z]{6}\+/, '');
+  if (/Courier/i.test(b)) return { fixed: 600 };
+  var key = null;
+  if (/Helvetica|Arial/i.test(b)) key = /Bold/i.test(b) ? 'Helvetica-Bold' : 'Helvetica';
+  else if (/Times/i.test(b)) key = /Bold/i.test(b) ? 'Times-Bold' : 'Times-Roman';
+  if (!key) return null;
+  var arr = _PDF_STD_WIDTHS_[key].split(',');
+  var map = {};
+  for (var i = 0; i < arr.length; i++) map[32 + i] = parseInt(arr[i], 10);
+  return { map: map };
+}
+
+// Windows-1252-Bereich 0x80-0x9F (WinAnsiEncoding); Rest = Latin-1.
+var _PDF_WINANSI_80_ = '€�‚ƒ„…†‡ˆ‰Š‹Œ�Ž�' +
+                       '�‘’“”•–—˜™š›œ�žŸ';
+
+function _pdfBaseEncodingTable_(encName) {
+  var t = new Array(256);
+  for (var c = 0; c < 256; c++) {
+    if (c < 32) t[c] = '';
+    else if (c >= 0x80 && c <= 0x9F) t[c] = _PDF_WINANSI_80_.charAt(c - 0x80);
+    else t[c] = String.fromCharCode(c);
+  }
+  if (encName === 'StandardEncoding') { t[0x27] = '’'; t[0x60] = '‘'; }
+  t[0xAD] = '-';
+  return t;
+}
+
+var _PDF_GLYPH_NAMES_ = null;
+function _pdfGlyphNameTable_() {
+  if (_PDF_GLYPH_NAMES_) return _PDF_GLYPH_NAMES_;
+  var t = {
+    space: ' ', exclam: '!', quotedbl: '"', numbersign: '#', dollar: '$', percent: '%', ampersand: '&',
+    quotesingle: "'", quoteright: '’', quoteleft: '‘', parenleft: '(', parenright: ')', asterisk: '*',
+    plus: '+', comma: ',', hyphen: '-', minus: '-', period: '.', slash: '/', colon: ':', semicolon: ';',
+    less: '<', equal: '=', greater: '>', question: '?', at: '@', bracketleft: '[', backslash: '\\',
+    bracketright: ']', asciicircum: '^', underscore: '_', grave: '`', braceleft: '{', bar: '|',
+    braceright: '}', asciitilde: '~', exclamdown: '¡', cent: '¢', sterling: '£',
+    currency: '¤', yen: '¥', brokenbar: '¦', section: '§', dieresis: '¨',
+    copyright: '©', ordfeminine: 'ª', guillemotleft: '«', logicalnot: '¬',
+    registered: '®', macron: '¯', degree: '°', plusminus: '±', twosuperior: '²',
+    threesuperior: '³', acute: '´', mu: 'µ', paragraph: '¶', periodcentered: '·',
+    cedilla: '¸', onesuperior: '¹', ordmasculine: 'º', guillemotright: '»',
+    onequarter: '¼', onehalf: '½', threequarters: '¾', questiondown: '¿',
+    multiply: '×', divide: '÷', germandbls: 'ß', AE: 'Æ', ae: 'æ',
+    Oslash: 'Ø', oslash: 'ø', OE: 'Œ', oe: 'œ', Lslash: 'Ł', lslash: 'ł',
+    Eth: 'Ð', eth: 'ð', Thorn: 'Þ', thorn: 'þ', dotlessi: 'ı',
+    endash: '–', emdash: '—', quotedblleft: '“', quotedblright: '”',
+    quotesinglbase: '‚', quotedblbase: '„', dagger: '†', daggerdbl: '‡',
+    bullet: '•', ellipsis: '…', perthousand: '‰', guilsinglleft: '‹',
+    guilsinglright: '›', Euro: '€', trademark: '™', fi: 'fi', fl: 'fl', ff: 'ff',
+    ffi: 'ffi', ffl: 'ffl', nbspace: ' ', nonbreakingspace: ' ', sfthyphen: '-', softhyphen: '-',
+    florin: 'ƒ', circumflex: 'ˆ', tilde: '˜',
+    zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9'
+  };
+  // Akzentbuchstaben (eacute, Adieresis, scaron, ...) aus der Unicode-Zerlegung ableiten.
+  var accents = { 0x301: 'acute', 0x300: 'grave', 0x302: 'circumflex', 0x308: 'dieresis', 0x303: 'tilde',
+    0x30A: 'ring', 0x327: 'cedilla', 0x30C: 'caron', 0x328: 'ogonek', 0x306: 'breve', 0x304: 'macron',
+    0x307: 'dotaccent', 0x30B: 'hungarumlaut' };
+  for (var cp = 0xC0; cp <= 0x17F; cp++) {
+    var ch = String.fromCharCode(cp);
+    var nfd = ch.normalize ? ch.normalize('NFD') : ch;
+    if (nfd.length === 2 && accents[nfd.charCodeAt(1)]) t[nfd.charAt(0) + accents[nfd.charCodeAt(1)]] = ch;
+  }
+  _PDF_GLYPH_NAMES_ = t;
+  return t;
+}
+
+function _pdfGlyphNameToUnicode_(name) {
+  if (!name) return '';
+  var base = name.split('.')[0];
+  if (!base) return '';
+  var parts = base.split('_');
+  if (parts.length > 1) return parts.map(_pdfGlyphNameToUnicode_).join('');
+  if (/^[A-Za-z]$/.test(base)) return base;
+  var t = _pdfGlyphNameTable_();
+  if (t.hasOwnProperty(base)) return t[base];
+  var m = /^uni((?:[0-9A-Fa-f]{4})+)$/.exec(base);
+  if (m) {
+    var out = '';
+    for (var i = 0; i < m[1].length; i += 4) out += String.fromCharCode(parseInt(m[1].substr(i, 4), 16));
+    return out;
+  }
+  m = /^u([0-9A-Fa-f]{4,6})$/.exec(base);
+  if (m) {
+    var cp = parseInt(m[1], 16);
+    if (cp <= 0xFFFF) return String.fromCharCode(cp);
+    cp -= 0x10000;
+    return String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+  }
+  return '';
+}
+
+function _pdfUtf16HexToString_(hex) {
+  hex = hex.replace(/\s+/g, '');
+  if (hex.length <= 2) return hex ? String.fromCharCode(parseInt(hex, 16)) : '';
+  var out = '';
+  for (var i = 0; i + 4 <= hex.length; i += 4) out += String.fromCharCode(parseInt(hex.substr(i, 4), 16));
+  return out;
+}
+
+// Parst eine CMap (ToUnicode oder eingebettetes Encoding): bfchar/bfrange ->
+// Unicode-Zuordnung, codespacerange -> Länge der Zeichencodes.
+function _pdfParseCMap_(cmapText) {
+  var map = {}, codespace = [];
+  var block, m;
+
+  var csRe = /begincodespacerange([\s\S]*?)endcodespacerange/g;
+  while ((block = csRe.exec(cmapText))) {
+    var pairRe = /<([0-9A-Fa-f\s]*)>\s*<([0-9A-Fa-f\s]*)>/g;
+    while ((m = pairRe.exec(block[1]))) {
+      var lo = m[1].replace(/\s+/g, '');
+      codespace.push({ len: Math.max(1, Math.ceil(lo.length / 2)), lo: parseInt(lo, 16), hi: parseInt(m[2].replace(/\s+/g, ''), 16) });
+    }
+  }
+
+  var charRe = /beginbfchar([\s\S]*?)endbfchar/g;
+  while ((block = charRe.exec(cmapText))) {
+    var cRe = /<([0-9A-Fa-f\s]*)>\s*<([0-9A-Fa-f\s]*)>/g;
+    while ((m = cRe.exec(block[1]))) map[parseInt(m[1].replace(/\s+/g, ''), 16)] = _pdfUtf16HexToString_(m[2]);
+  }
+
+  var rangeRe = /beginbfrange([\s\S]*?)endbfrange/g;
+  while ((block = rangeRe.exec(cmapText))) {
+    var rRe = /<([0-9A-Fa-f\s]*)>\s*<([0-9A-Fa-f\s]*)>\s*(<[0-9A-Fa-f\s]*>|\[[^\]]*\])/g;
+    while ((m = rRe.exec(block[1]))) {
+      var start = parseInt(m[1].replace(/\s+/g, ''), 16), end = parseInt(m[2].replace(/\s+/g, ''), 16);
+      if (isNaN(start) || isNaN(end) || end < start || end - start > 65535) continue;
+      if (m[3].charAt(0) === '[') {
+        var items = m[3].match(/<[0-9A-Fa-f\s]*>/g) || [];
+        for (var k = 0; k < items.length && start + k <= end; k++) map[start + k] = _pdfUtf16HexToString_(items[k].slice(1, -1));
+      } else {
+        var baseStr = _pdfUtf16HexToString_(m[3].slice(1, -1));
+        if (!baseStr) continue;
+        var prefix = baseStr.slice(0, -1), lastCode = baseStr.charCodeAt(baseStr.length - 1);
+        for (var c = start; c <= end; c++) map[c] = prefix + String.fromCharCode(lastCode + (c - start));
+      }
+    }
+  }
+  return { map: map, codespace: codespace };
+}
+
+function _pdfLoadFont_(doc, fontRef) {
+  var key = fontRef && fontRef.r !== undefined ? 'r' + fontRef.r : null;
+  if (key && doc.fontCache.hasOwnProperty(key)) return doc.fontCache[key];
+  var font;
+  try {
+    font = _pdfBuildFont_(doc, _pdfDocRes_(doc, fontRef));
+  } catch (e) {
+    Logger.log('_pdfLoadFont_: Schrift nicht auswertbar: ' + e.message);
+    font = _pdfBuildFont_(doc, null);
+  }
+  if (key) doc.fontCache[key] = font;
+  return font;
+}
+
+function _pdfBuildFont_(doc, fontDict) {
+  var font = {
+    type0: false, widths: {}, dw: 1000, missingWidth: 0, std: null,
+    scale: 0.001, asc: 0.8, desc: -0.2, toUni: null, encTable: null, codespace: null, unicodeCodes: false
+  };
+  if (!fontDict || !fontDict.d) { font.encTable = _pdfBaseEncodingTable_('WinAnsiEncoding'); font.missingWidth = 500; return font; }
+
+  var subtype = _pdfName_(_pdfDocGet_(doc, fontDict, 'Subtype'));
+  var baseFont = _pdfName_(_pdfDocGet_(doc, fontDict, 'BaseFont'));
+  var descriptor = null;
+
+  if (subtype === 'Type0') {
+    font.type0 = true;
+    var descs = _pdfDocGet_(doc, fontDict, 'DescendantFonts');
+    var cid = Array.isArray(descs) && descs.length ? _pdfDocRes_(doc, descs[0]) : null;
+    if (cid && cid.d) {
+      font.dw = _pdfNum_(_pdfDocGet_(doc, cid, 'DW'), 1000);
+      var w = _pdfDocGet_(doc, cid, 'W');
+      if (Array.isArray(w)) {
+        for (var i = 0; i < w.length;) {
+          var first = _pdfDocRes_(doc, w[i]), next = _pdfDocRes_(doc, w[i + 1]);
+          if (typeof first !== 'number') break;
+          if (Array.isArray(next)) {
+            for (var j = 0; j < next.length; j++) font.widths[first + j] = _pdfNum_(_pdfDocRes_(doc, next[j]), font.dw);
+            i += 2;
+          } else {
+            var last = next, width = _pdfNum_(_pdfDocRes_(doc, w[i + 2]), font.dw);
+            if (typeof last !== 'number' || last - first > 65535) break;
+            for (var c = first; c <= last; c++) font.widths[c] = width;
+            i += 3;
+          }
+        }
+      }
+      descriptor = _pdfDocGet_(doc, cid, 'FontDescriptor');
+    }
+    var enc = fontDict.d.Encoding;
+    var encName = _pdfName_(_pdfDocRes_(doc, enc));
+    if (encName) {
+      // Vordefinierte Unicode-CMaps (z.B. UniGB-UCS2-H): Code = UTF-16-Wert.
+      if (/^Uni.*(UCS2|UTF16)/.test(encName)) font.unicodeCodes = true;
+    } else if (enc && enc.r !== undefined) {
+      var encText = _pdfDocStreamText_(doc, enc);
+      if (encText) {
+        var cs = _pdfParseCMap_(encText).codespace;
+        if (cs.length) font.codespace = cs;
+      }
+    }
+  } else {
+    var firstChar = _pdfNum_(_pdfDocGet_(doc, fontDict, 'FirstChar'), 0);
+    var widths = _pdfDocGet_(doc, fontDict, 'Widths');
+    if (Array.isArray(widths)) {
+      for (var k = 0; k < widths.length; k++) {
+        var wv = _pdfDocRes_(doc, widths[k]);
+        if (typeof wv === 'number') font.widths[firstChar + k] = wv;
+      }
+    } else {
+      font.std = _pdfStdWidthsFor_(baseFont);
+    }
+    if (subtype === 'Type3') {
+      var fm = _pdfDocGet_(doc, fontDict, 'FontMatrix');
+      if (Array.isArray(fm) && typeof fm[0] === 'number' && fm[0]) font.scale = Math.abs(fm[0]);
+    }
+    descriptor = _pdfDocGet_(doc, fontDict, 'FontDescriptor');
+
+    var encV = _pdfDocGet_(doc, fontDict, 'Encoding');
+    var baseEnc = 'WinAnsiEncoding', diffs = null;
+    if (_pdfName_(encV)) baseEnc = _pdfName_(encV);
+    else if (encV && encV.d) {
+      baseEnc = _pdfName_(_pdfDocGet_(doc, encV, 'BaseEncoding')) || baseEnc;
+      diffs = _pdfDocGet_(doc, encV, 'Differences');
+    }
+    font.encTable = _pdfBaseEncodingTable_(baseEnc);
+    if (Array.isArray(diffs)) {
+      var code = 0;
+      diffs.forEach(function(item) {
+        item = _pdfDocRes_(doc, item);
+        if (typeof item === 'number') code = item;
+        else if (item && item.n !== undefined) { if (code >= 0 && code < 256) font.encTable[code] = _pdfGlyphNameToUnicode_(item.n) || '�'; code++; }
+      });
+    }
+  }
+
+  if (descriptor && descriptor.d) {
+    var asc = _pdfNum_(_pdfDocGet_(doc, descriptor, 'Ascent'), 0) / 1000;
+    var dsc = _pdfNum_(_pdfDocGet_(doc, descriptor, 'Descent'), 0) / 1000;
+    if (asc > 0.5 && asc < 1.2) font.asc = asc;
+    if (dsc < 0 && dsc > -0.5) font.desc = dsc;
+    font.missingWidth = _pdfNum_(_pdfDocGet_(doc, descriptor, 'MissingWidth'), 0);
+  }
+  if (!font.missingWidth) font.missingWidth = font.type0 ? font.dw : 500;
+
+  var tu = fontDict.d.ToUnicode;
+  if (tu && tu.r !== undefined) {
+    var tuText = _pdfDocStreamText_(doc, tu);
+    if (tuText) font.toUni = _pdfParseCMap_(tuText).map;
+  }
+  return font;
+}
+
+// Liest den nächsten Zeichencode ab str[i] (1 Byte bei einfachen Schriften,
+// bei Type0 laut Codespace, standardmäßig 2 Byte wie bei Identity-H).
+function _pdfNextCode_(font, str, i) {
+  if (!font.type0) return { code: str.charCodeAt(i) & 0xFF, len: 1 };
+  if (font.codespace) {
+    for (var len = 1; len <= 4 && i + len <= str.length; len++) {
+      var code = 0;
+      for (var b = 0; b < len; b++) code = code * 256 + (str.charCodeAt(i + b) & 0xFF);
+      for (var r = 0; r < font.codespace.length; r++) {
+        var cs = font.codespace[r];
+        if (cs.len === len && code >= cs.lo && code <= cs.hi) return { code: code, len: len };
+      }
+    }
+  }
+  if (i + 1 >= str.length) return { code: str.charCodeAt(i) & 0xFF, len: 1 };
+  return { code: ((str.charCodeAt(i) & 0xFF) << 8) | (str.charCodeAt(i + 1) & 0xFF), len: 2 };
+}
+
+function _pdfGlyphUnicode_(font, code) {
+  if (font.toUni && font.toUni.hasOwnProperty(code)) return font.toUni[code];
+  if (font.type0) return font.unicodeCodes ? String.fromCharCode(code) : '�';
+  return font.encTable ? font.encTable[code] : String.fromCharCode(code);
+}
+
+// Breite in Textraum-Einheiten (bei Schriftgröße 1).
+function _pdfGlyphWidth_(font, code) {
+  var w;
+  if (font.widths.hasOwnProperty(code)) w = font.widths[code];
+  else if (font.std) w = font.std.fixed || font.std.map[code] || font.missingWidth;
+  else w = font.type0 ? font.dw : font.missingWidth;
+  return w * font.scale;
+}
+
+// ─── CONTENT-STREAM INTERPRETIEREN -> GLYPHEN MIT POSITION ────────────────
+/**
+ * Liefert alle Glyphen einer Seite in Zeichenreihenfolge des Content-Streams:
+ * { u: Unicode-Text, ox/oy: Ursprung, ex/ey: Ende (nach Vorschub),
+ *   box: [x0, y0, x1, y1] im Seitenraum, h: effektive Schrifthöhe }.
+ * page: Seitenobjekt aus _pdfCollectPages_ (braucht .num).
+ */
+function _pdfExtractPageGlyphs_(doc, page) {
+  var pageObj = _pdfDocObj_(doc, page.num);
+  if (!pageObj || !pageObj.d) return null;
+
+  // /Resources kann vom Pages-Elternknoten geerbt sein.
+  var resources = null, node = pageObj;
+  for (var depth = 0; node && depth < 32 && !resources; depth++) {
+    resources = _pdfDocGet_(doc, node, 'Resources') || null;
+    node = _pdfDocGet_(doc, node, 'Parent');
+  }
+
+  var contents = pageObj.d.Contents;
+  var refs = [];
+  var resolved = _pdfDocRes_(doc, contents);
+  if (contents && contents.r !== undefined && !Array.isArray(resolved)) refs.push(contents);
+  else if (Array.isArray(resolved)) resolved.forEach(function(r) { if (r && r.r !== undefined) refs.push(r); });
+  if (!refs.length) return [];
+
+  var parts = [];
+  for (var i = 0; i < refs.length; i++) {
+    var t = _pdfDocStreamText_(doc, refs[i]);
+    if (t === null) return null; // unvollständiger Inhalt -> lieber kein Ergebnis als ein falsches
+    parts.push(t);
+  }
+  // Seiteninhalte nicht im Cache halten: bei langen Dokumenten läge sonst der
+  // dekomprimierte Inhalt ALLER Seiten gleichzeitig im Speicher.
+  for (var c = 0; c < refs.length; c++) delete doc.streamCache[refs[c].r];
+  var glyphs = [];
+  _pdfRunContent_(doc, parts.join('\n'), resources, _pdfMatIdentity_(), glyphs, 0);
+  return glyphs;
+}
+
+function _pdfRunContent_(doc, content, resources, baseCtm, glyphs, depth) {
+  var gs = { ctm: baseCtm, font: null, size: 0, tc: 0, tw: 0, th: 1, tl: 0, rise: 0 };
+  var stack = [];
+  var tm = _pdfMatIdentity_(), tlm = _pdfMatIdentity_();
+  var operands = [];
+  var n = content.length, i = 0;
+  var fontsDict = _pdfDocGet_(doc, resources, 'Font');
+  var xobjDict = _pdfDocGet_(doc, resources, 'XObject');
+  var fallbackFont = null;
+
+  function num(k) { var v = operands[operands.length - k]; return typeof v === 'number' ? v : 0; }
+  function copyGs() {
+    return { ctm: gs.ctm, font: gs.font, size: gs.size, tc: gs.tc, tw: gs.tw, th: gs.th, tl: gs.tl, rise: gs.rise };
+  }
+  function moveLine(tx, ty) { tlm = _pdfMatMul_([1, 0, 0, 1, tx, ty], tlm); tm = tlm; }
+
+  function showString(str) {
+    var font = gs.font;
+    if (!font) { if (!fallbackFont) fallbackFont = _pdfBuildFont_(doc, null); font = fallbackFont; }
+    var size = gs.size || 1;
+    var k = 0;
+    while (k < str.length) {
+      var cc = _pdfNextCode_(font, str, k);
+      k += cc.len;
+      var w0 = _pdfGlyphWidth_(font, cc.code);
+      var u = _pdfGlyphUnicode_(font, cc.code);
+      var trm = _pdfMatMul_(_pdfMatMul_([size * gs.th, 0, 0, size, 0, gs.rise], tm), gs.ctm);
+      var pts = [[0, font.desc], [w0, font.desc], [w0, font.asc], [0, font.asc]];
+      var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (var p = 0; p < 4; p++) {
+        var px = trm[0] * pts[p][0] + trm[2] * pts[p][1] + trm[4];
+        var py = trm[1] * pts[p][0] + trm[3] * pts[p][1] + trm[5];
+        if (px < x0) x0 = px; if (px > x1) x1 = px;
+        if (py < y0) y0 = py; if (py > y1) y1 = py;
+      }
+      glyphs.push({
+        u: u,
+        ox: trm[4], oy: trm[5],
+        ex: trm[0] * w0 + trm[4], ey: trm[1] * w0 + trm[5],
+        dx: trm[0], dy: trm[1],
+        h: Math.sqrt(trm[2] * trm[2] + trm[3] * trm[3]),
+        box: [x0, y0, x1, y1]
+      });
+      var isSpace = cc.len === 1 && cc.code === 32;
+      var tx = (w0 * size + gs.tc + (isSpace ? gs.tw : 0)) * gs.th;
+      tm = _pdfMatMul_([1, 0, 0, 1, tx, 0], tm);
+    }
+  }
+
+  while (true) {
+    i = _pdfSkipWs_(content, i);
+    if (i >= n) break;
+    var r = _pdfParseValue_(content, i, false);
+    if (r.next <= i) { i++; continue; }
+    i = r.next;
+    var v = r.v;
+    if (v === undefined) continue;
+    if (!(v && v.op !== undefined)) { operands.push(v); continue; }
+
+    var op = v.op;
+    switch (op) {
+      case 'q': stack.push(copyGs()); break;
+      case 'Q': if (stack.length) gs = stack.pop(); break;
+      case 'cm':
+        if (operands.length >= 6) gs.ctm = _pdfMatMul_([num(6), num(5), num(4), num(3), num(2), num(1)], gs.ctm);
+        break;
+      case 'BT': tm = _pdfMatIdentity_(); tlm = _pdfMatIdentity_(); break;
+      case 'Tf': {
+        var fname = operands[operands.length - 2];
+        gs.size = num(1);
+        var fref = fname && fname.n !== undefined && fontsDict && fontsDict.d ? fontsDict.d[fname.n] : null;
+        gs.font = fref ? _pdfLoadFont_(doc, fref) : null;
+        break;
+      }
+      case 'Tc': gs.tc = num(1); break;
+      case 'Tw': gs.tw = num(1); break;
+      case 'Tz': gs.th = num(1) / 100; break;
+      case 'TL': gs.tl = num(1); break;
+      case 'Ts': gs.rise = num(1); break;
+      case 'Tm':
+        if (operands.length >= 6) { tm = [num(6), num(5), num(4), num(3), num(2), num(1)]; tlm = tm; }
+        break;
+      case 'Td': if (operands.length >= 2) moveLine(num(2), num(1)); break;
+      case 'TD': if (operands.length >= 2) { gs.tl = -num(1); moveLine(num(2), num(1)); } break;
+      case 'T*': moveLine(0, -gs.tl); break;
+      case 'Tj': {
+        var s1 = operands[operands.length - 1];
+        if (s1 && s1.s !== undefined) showString(s1.s);
+        break;
+      }
+      case "'": {
+        moveLine(0, -gs.tl);
+        var s2 = operands[operands.length - 1];
+        if (s2 && s2.s !== undefined) showString(s2.s);
+        break;
+      }
+      case '"': {
+        if (operands.length >= 3) { gs.tw = num(3); gs.tc = num(2); }
+        moveLine(0, -gs.tl);
+        var s3 = operands[operands.length - 1];
+        if (s3 && s3.s !== undefined) showString(s3.s);
+        break;
+      }
+      case 'TJ': {
+        var arr = operands[operands.length - 1];
+        if (Array.isArray(arr)) {
+          arr.forEach(function(item) {
+            if (typeof item === 'number') tm = _pdfMatMul_([1, 0, 0, 1, -item / 1000 * (gs.size || 1) * gs.th, 0], tm);
+            else if (item && item.s !== undefined) showString(item.s);
+          });
+        }
+        break;
+      }
+      case 'Do': {
+        var xname = operands[operands.length - 1];
+        if (depth < 6 && xname && xname.n !== undefined && xobjDict && xobjDict.d && xobjDict.d[xname.n]) {
+          var xref = xobjDict.d[xname.n];
+          var xobj = _pdfDocRes_(doc, xref);
+          if (xobj && xobj.d && _pdfName_(_pdfDocGet_(doc, xobj, 'Subtype')) === 'Form') {
+            var formText = _pdfDocStreamText_(doc, xref);
+            if (formText) {
+              var fmx = _pdfDocGet_(doc, xobj, 'Matrix');
+              var formCtm = Array.isArray(fmx) && fmx.length === 6 ? _pdfMatMul_(fmx, gs.ctm) : gs.ctm;
+              _pdfRunContent_(doc, formText, _pdfDocGet_(doc, xobj, 'Resources') || resources, formCtm, glyphs, depth + 1);
+            }
+          }
+        }
+        break;
+      }
+      case 'BI': {
+        // Inline-Bild: Binärdaten bis zum "EI" überspringen statt zu parsen.
+        var idIdx = content.indexOf('ID', i);
+        var p = idIdx === -1 ? n : idIdx + 3;
+        var eiRe = /\sEI(?=[\s]|$)/g;
+        eiRe.lastIndex = p;
+        var eim = eiRe.exec(content);
+        i = eim ? eiRe.lastIndex : n;
+        break;
+      }
+      default: break; // alle anderen Operatoren sind für die Textposition irrelevant
+    }
+    operands = [];
+  }
+}
+
+// ─── SEITENTEXT AUFBAUEN UND ZITAT SUCHEN ─────────────────────────────────
+// Liegt zwischen zwei Glyphen eine sichtbare Lücke oder ein Zeilenwechsel,
+// wird ein Leerzeichen eingefügt (viele PDFs enthalten keine echten
+// Leerzeichen, sondern positionieren Wörter nur).
+function _pdfBuildPageModel_(glyphs) {
+  var chars = [], map = [];
+  var prev = null;
+  var minX = Infinity, maxX = -Infinity;
+  for (var g = 0; g < glyphs.length; g++) {
+    var gl = glyphs[g];
+    if (!gl.u) continue;
+    if (gl.box[0] < minX) minX = gl.box[0];
+    if (gl.box[2] > maxX) maxX = gl.box[2];
+    if (prev) {
+      var len = Math.sqrt(prev.dx * prev.dx + prev.dy * prev.dy) || 1;
+      var ux = prev.dx / len, uy = prev.dy / len;
+      var ddx = gl.ox - prev.ex, ddy = gl.oy - prev.ey;
+      var along = ddx * ux + ddy * uy, perp = -ddx * uy + ddy * ux;
+      var h = Math.max(prev.h, 1);
+      var gap = Math.abs(perp) > h * 0.5 || along < -h * 0.5 || along > h * 0.15;
+      if (gap && !/\s$/.test(chars[chars.length - 1]) && !/^\s/.test(gl.u)) { chars.push(' '); map.push(-1); }
+    }
+    chars.push(gl.u);
+    map.push(g);
+    prev = gl;
+  }
+  return { glyphs: glyphs, chars: chars, map: map, norm: {}, textLeft: minX, textRight: maxX };
+}
+
+function _pdfNormChar_(ch) {
+  if (ch.normalize) ch = ch.normalize('NFKC');
+  return ch.toLowerCase()
+    .replace(/[‘’‚‛′´`]/g, "'")
+    .replace(/[“”„‟″«»]/g, '"')
+    .replace(/[‐-―−]/g, '-')
+    .replace(/­/g, '')
+    .replace(/[\s  -​ ]/g, ' ');
+}
+
+// strip=false: Whitespace zusammengefasst. strip=true: Whitespace und
+// Bindestriche komplett entfernt (Silbentrennung am Zeilenende, Kerning-Artefakte).
+function _pdfNormalizeChars_(chars, map, strip) {
+  var out = [], outMap = [];
+  for (var k = 0; k < chars.length; k++) {
+    var t = _pdfNormChar_(chars[k]);
+    for (var c = 0; c < t.length; c++) {
+      var ch = t.charAt(c);
+      if (ch === ' ') {
+        if (strip || !out.length || out[out.length - 1] === ' ') continue;
+      } else if (strip && ch === '-') continue;
+      out.push(ch);
+      outMap.push(map ? map[k] : k);
+    }
+  }
+  while (out.length && out[out.length - 1] === ' ') { out.pop(); outMap.pop(); }
+  return { s: out.join(''), m: outMap };
+}
+
+function _pdfPageNorm_(model, strip) {
+  var key = strip ? 'strip' : 'ws';
+  if (!model.norm[key]) model.norm[key] = _pdfNormalizeChars_(model.chars, model.map, strip);
+  return model.norm[key];
+}
+
+function _pdfFindNth_(hay, needle, from, occurrence) {
+  var pos = -1, found = [];
+  while (found.length <= occurrence) {
+    pos = hay.indexOf(needle, pos === -1 ? from : pos + 1);
+    if (pos === -1) break;
+    found.push(pos);
+  }
+  return found.length ? found[Math.min(occurrence, found.length - 1)] : -1;
+}
+
+/**
+ * Sucht quote auf einer Seite (model aus _pdfBuildPageModel_). occurrence
+ * (0-basiert) wählt bei mehrfach vorkommendem Zitat das n-te Vorkommen.
+ * Liefert { boxes: [[x0,y0,x1,y1], ...] (ein Rechteck pro Textzeile),
+ * exact: bool } oder null.
+ */
+function _pdfFindQuoteOnPage_(model, quote, occurrence) {
+  occurrence = occurrence || 0;
+  var modes = [false, true];
+  for (var mi = 0; mi < modes.length; mi++) {
+    var strip = modes[mi];
+    var q = _pdfNormalizeChars_(String(quote || '').split(''), null, strip).s.replace(/^\s+/, '');
+    if (q.length < (strip ? 4 : 2)) continue;
+    var page = _pdfPageNorm_(model, strip);
+    if (!page.s) continue;
+
+    var start = _pdfFindNth_(page.s, q, 0, occurrence), end = -1, exact = true;
+    if (start !== -1) {
+      end = start + q.length - 1;
+    } else if (q.length >= 30) {
+      // Zitat weicht leicht ab (Gemini paraphrasiert gelegentlich in der Mitte):
+      // Anfang und Ende getrennt suchen und den Bereich dazwischen markieren.
+      exact = false;
+      var head = q.slice(0, 20), tail = q.slice(-20);
+      start = _pdfFindNth_(page.s, head, 0, occurrence);
+      if (start !== -1) {
+        var tailPos = page.s.indexOf(tail, start + head.length);
+        end = (tailPos !== -1 && tailPos + tail.length - start <= q.length * 1.5)
+          ? tailPos + tail.length - 1
+          : start + head.length - 1;
+      }
+    }
+    if (start === -1) continue;
+
+    var glyphIdx = [];
+    for (var p = start; p <= end; p++) {
+      var gi = page.m[p];
+      if (gi >= 0 && glyphIdx[glyphIdx.length - 1] !== gi) glyphIdx.push(gi);
+    }
+    var boxes = _pdfGlyphLineBoxes_(model.glyphs, glyphIdx);
+    if (boxes.length) return { boxes: boxes, exact: exact };
+  }
+  return null;
+}
+
+// ─── SUCHINDEX (nur Text, ohne Glyphen) ───────────────────────────────────
+// Das Seitenmodell mit allen Glyphen ist gross. Fuer die Frage "kommt das Zitat
+// auf dieser Seite ueberhaupt vor?" reicht der normalisierte Text - so muss nur
+// fuer Trefferseiten das volle Modell im Speicher liegen.
+
+/** Normalisierter Text einer Seite in beiden Suchmodi: { ws, strip }. */
+function _pdfPageSearchIndex_(model) {
+  return _pdfSearchIndexFromWs_(_pdfPageNorm_(model, false).s);
+}
+
+// Der "strip"-Text ist der "ws"-Text ohne Leerzeichen und Bindestriche - so
+// reicht es, im Zwischenstand einer fortgesetzten Suche nur "ws" zu speichern.
+function _pdfSearchIndexFromWs_(ws) {
+  return { ws: ws, strip: ws.replace(/[ -]/g, '') };
+}
+
+/** Suchmuster eines Zitats, einmal pro Fund berechnet (gleiche Regeln wie _pdfFindQuoteOnPage_). */
+function _pdfQuoteNeedles_(quote) {
+  var out = [];
+  [false, true].forEach(function(strip) {
+    var q = _pdfNormalizeChars_(String(quote || '').split(''), null, strip).s.replace(/^\s+/, '');
+    if (q.length < (strip ? 4 : 2)) return;
+    out.push({ key: strip ? 'strip' : 'ws', q: q, head: q.length >= 30 ? q.slice(0, 20) : null });
+  });
+  return out;
+}
+
+/**
+ * Schnelltest gegen den Suchindex einer Seite: 2 = Zitat steht woertlich auf
+ * der Seite, 1 = nur der Anfang (unscharfer Treffer moeglich), 0 = nichts.
+ * Bei 0 findet auch _pdfFindQuoteOnPage_ nichts.
+ */
+function _pdfQuoteMatchKind_(index, needles) {
+  var kind = 0;
+  for (var i = 0; i < needles.length; i++) {
+    var s = index[needles[i].key];
+    if (!s) continue;
+    if (s.indexOf(needles[i].q) !== -1) return 2;
+    if (needles[i].head && s.indexOf(needles[i].head) !== -1) kind = 1;
+  }
+  return kind;
+}
+
+// Fasst die Glyphen zu einem Rechteck pro Textzeile zusammen.
+function _pdfGlyphLineBoxes_(glyphs, idxList) {
+  var boxes = [], cur = null, lineRef = null;
+  idxList.forEach(function(gi) {
+    var g = glyphs[gi];
+    if (!g.u || /^\s+$/.test(g.u)) return;
+    var newLine = true;
+    if (lineRef) {
+      var len = Math.sqrt(lineRef.dx * lineRef.dx + lineRef.dy * lineRef.dy) || 1;
+      var perp = (-(g.ox - lineRef.ox) * lineRef.dy + (g.oy - lineRef.oy) * lineRef.dx) / len;
+      var along = ((g.ox - lineRef.ox) * lineRef.dx + (g.oy - lineRef.oy) * lineRef.dy) / len;
+      newLine = Math.abs(perp) > Math.max(lineRef.h, 1) * 0.5 || along < -Math.max(lineRef.h, 1);
+    }
+    if (newLine) {
+      cur = g.box.slice();
+      boxes.push(cur);
+      lineRef = g;
+    } else {
+      cur[0] = Math.min(cur[0], g.box[0]); cur[1] = Math.min(cur[1], g.box[1]);
+      cur[2] = Math.max(cur[2], g.box[2]); cur[3] = Math.max(cur[3], g.box[3]);
+    }
+  });
+  return boxes;
+}
+
+// ─── TEXT ALLER SEITEN (fuer Gesamtdokument-Prompts ohne PDF-Anhang) ───────
+// Wie _pdfBuildPageModel_, aber mit Zeilenumbruechen, damit Ueberschriften,
+// Schrittfolgen und Tabellen als Zeilen erkennbar bleiben.
+function _pdfPageTextFromGlyphs_(glyphs) {
+  var out = [], prev = null;
+  for (var g = 0; g < glyphs.length; g++) {
+    var gl = glyphs[g];
+    if (!gl.u) continue;
+    if (prev) {
+      var len = Math.sqrt(prev.dx * prev.dx + prev.dy * prev.dy) || 1;
+      var ux = prev.dx / len, uy = prev.dy / len;
+      var ddx = gl.ox - prev.ex, ddy = gl.oy - prev.ey;
+      var along = ddx * ux + ddy * uy, perp = -ddx * uy + ddy * ux;
+      var h = Math.max(prev.h, 1);
+      var last = out[out.length - 1];
+      if (Math.abs(perp) > h * 0.5 || along < -h * 2) { if (!/\n$/.test(last)) out.push('\n'); }
+      else if ((along < -h * 0.5 || along > h * 0.15) && !/\s$/.test(last) && !/^\s/.test(gl.u)) out.push(' ');
+    }
+    out.push(gl.u);
+    prev = gl;
+  }
+  return out.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * Liest den Text aller Seiten einer PDF (Binaerstring, 1 Zeichen = 1 Byte).
+ * Liefert ein Array mit einem String pro Seite ('' fuer Seiten ohne lesbaren
+ * Text, z. B. reine Bilder oder nicht unterstuetzte Schriften).
+ */
+function _pdfExtractPageTexts_(text) {
+  var offsets = _pdfScanObjectOffsets_(text);
+  var doc = _pdfOpenDoc_(text, offsets);
+  var pages = _pdfCollectPages_(text, offsets, _pdfFindRootRef_(text), doc);
+  return pages.map(function(page) {
+    try {
+      var glyphs = _pdfExtractPageGlyphs_(doc, page);
+      return glyphs && glyphs.length ? _pdfPageTextFromGlyphs_(glyphs) : '';
+    } catch (e) {
+      return '';
+    }
+  });
+}
+// ---- PdfAnnotate.js ----
+// ============================================================================
+// PDF-ANNOTATIONEN OHNE FREMDBIBLIOTHEK ("echte" Notizen direkt in der PDF)
+// ============================================================================
+// Google Drive selbst unterstützt für PDFs (Blob-Dateien) keine sichtbaren
+// Kommentare (siehe DriveAddon.gs). Der einzige Weg zu Notizen, die beim
+// Öffnen der PDF selbst (Drive-Vorschau, Adobe Acrobat, ...) sichtbar sind,
+// ist ein echtes PDF-Annotation-Objekt (/Subtype /Text, "Sticky Note"),
+// direkt in die PDF-Bytes geschrieben.
+//
+// Apps Script hat keine PDF-Bibliothek und keine Möglichkeit, beliebige
+// npm-/Java-Bibliotheken zu laden. Deshalb wird hier ein "Incremental Update"
+// von Hand erzeugt - exakt die Technik, mit der auch Adobe Acrobat selbst
+// Kommentare zu einer PDF hinzufügt: die Original-Bytes bleiben unverändert,
+// am Dateiende werden neue Objekte (die Annotation + die aktualisierte
+// Seiten-Definition mit erweitertem /Annots-Array) sowie eine neue,
+// eigenständige Cross-Reference-Tabelle mit /Prev-Verweis auf die alte
+// angehängt. Das ist laut PDF-Spezifikation (ISO 32000) ein regulärer,
+// unterstützter Vorgang, keine Umgehung.
+//
+// GRENZE (bewusst, mit klarer Fehlermeldung statt stiller Beschädigung):
+// Objekte, die in einem komprimierten Object Stream (/Type /ObjStm) liegen
+// -  eine von vielen PDF-Produzenten genutzte Zusatzkompression, v. a. bei
+// stark optimierten PDFs - können ohne echte Inflate/Zlib-Dekompression
+// (die Apps Script nicht eingebaut hat) nicht gefunden werden. Trifft das
+// zu, wird ein Error geworfen statt eine kaputte Datei zu erzeugen; der
+// Aufrufer fängt das ab und bietet stattdessen "Export as Sheet" an.
+// Cross-Reference-STREAMS (der Mechanismus selbst, PDF 1.5+) sind dagegen
+// unterstützt, weil deren Dictionary immer Klartext ist - nur die eigentliche
+// Streamdaten sind komprimiert, und die werden hier gar nicht gebraucht.
+
+// Sicherheitsgrenze: Dateigröße/Laufzeit. Früher 60 - bei einer BTA mit 223
+// Befunden hörten die Kommentare in der PDF still nach dem 60. auf (10/2026).
+// 1000 Notizen machen die Datei nur um ca. 1-2 MB größer; die Laufzeit begrenzt
+// _drivePdfComputeAnnotations_ über eine Frist, nicht über die Anzahl.
+var PDF_ANNOT_MAX_PER_PDF = 1000;
+
+// ─── BYTE/STRING-KONVERTIERUNG ────────────────────────────────────────────
+// Blob.getBytes() liefert VORZEICHENBEHAFTETE Bytes (-128..127, Java-Erbe der
+// Apps-Script-Blob-API). Für die regex-basierte Verarbeitung wird daraus ein
+// "Binärstring" gebaut (1 Zeichen = 1 Byte, 0..255, wie Latin-1) - das erlaubt,
+// dieselbe Logik wie im Python-Prototyp 1:1 zu verwenden, inklusive exakter
+// Byte-Offsets für die xref-Tabelle.
+function _pdfBytesToBinaryString_(bytes) {
+  var CHUNK = 8192;
+  var parts = [];
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    var end = Math.min(i + CHUNK, bytes.length);
+    var chunk = new Array(end - i);
+    for (var j = i; j < end; j++) {
+      var b = bytes[j];
+      chunk[j - i] = b < 0 ? b + 256 : b;
+    }
+    parts.push(String.fromCharCode.apply(null, chunk));
+  }
+  return parts.join('');
+}
+
+function _pdfBinaryStringToBytes_(str) {
+  var len = str.length;
+  var bytes = new Array(len);
+  for (var i = 0; i < len; i++) {
+    var b = str.charCodeAt(i) & 0xFF;
+    bytes[i] = b > 127 ? b - 256 : b;
+  }
+  return bytes;
+}
+
+// UTF-16BE-Hexstring mit BOM (z.B. <FEFF0041...>) - unterstützt jede Sprache
+// (Kyrillisch/CJK/Arabisch/...), nicht nur Latin-1, und braucht kein Escaping,
+// da ein PDF-Hexstring nur aus Hexziffern und Whitespace bestehen kann.
+function _pdfHexString_(s) {
+  s = String(s || '').replace(/\r\n/g, '\n');
+  var out = ['FEFF'];
+  for (var i = 0; i < s.length; i++) {
+    var code = s.charCodeAt(i);
+    var hex = code.toString(16);
+    while (hex.length < 4) hex = '0' + hex;
+    out.push(hex);
+  }
+  return '<' + out.join('') + '>';
+}
+
+// ─── MINIMALES, KLARTEXT-BASIERTES PDF-PARSING ─────────────────────────────
+function _pdfFindRootRef_(text) {
+  var trailerRe = /trailer\s*<</g;
+  var m, last = null, lastEnd = null;
+  // WICHTIG: .lastIndex wird von exec() bei einem fehlgeschlagenen Match (Ende
+  // der Schleife) automatisch auf 0 zurückgesetzt - der Endpunkt des letzten
+  // ERFOLGREICHEN Matches muss daher schon WÄHREND der Schleife gesichert
+  // werden, nicht erst danach über trailerRe.lastIndex gelesen werden.
+  while ((m = trailerRe.exec(text))) { last = m; lastEnd = trailerRe.lastIndex; }
+  if (last) {
+    var start = lastEnd - 2; // Position von "<<"
+    var i = start, depth = 0;
+    while (i < text.length) {
+      if (text.substr(i, 2) === '<<') { depth++; i += 2; continue; }
+      if (text.substr(i, 2) === '>>') { depth--; i += 2; if (depth === 0) break; continue; }
+      i++;
+    }
+    var dictText = text.slice(start, i);
+    var rm = /\/Root\s+(\d+)\s+(\d+)\s+R/.exec(dictText);
+    if (rm) return parseInt(rm[1], 10);
+  }
+  // Fallback: PDFs mit Cross-Reference-STREAM statt klassischer xref-Tabelle
+  // haben keinen "trailer"-Block; ihr Trailer-Dictionary steckt stattdessen
+  // im xref-Stream-Objekt selbst (/Type /XRef ... /Root ...). Dieses
+  // Dictionary ist immer Klartext, nur die Stream-DATEN dahinter sind
+  // komprimiert - wir brauchen hier also keine Dekompression.
+  var xrefObjRe = /\/Type\s*\/XRef\b/g;
+  var xm, lastXm = null;
+  while ((xm = xrefObjRe.exec(text))) lastXm = xm;
+  if (lastXm) {
+    var winStart = Math.max(0, lastXm.index - 2000);
+    var winEnd = Math.min(text.length, lastXm.index + 2000);
+    var window = text.slice(winStart, winEnd);
+    var rm2 = /\/Root\s+(\d+)\s+(\d+)\s+R/.exec(window);
+    if (rm2) return parseInt(rm2[1], 10);
+  }
+  throw new Error('Could not locate /Root in the PDF trailer.');
+}
+
+// Liefert den Text des zuletzt geschriebenen Trailer-Dictionaries (klassischer
+// "trailer << ... >>" oder das Dictionary eines Cross-Reference-Streams
+// /Type /XRef), je nachdem, was weiter hinten in der Datei steht. Daraus kommen
+// /Size (naechste freie Objektnummer), /Info, /ID und /Encrypt.
+function _pdfLastTrailerDict_(text) {
+  var best = null;
+  var trailerRe = /trailer\s*<</g;
+  var m;
+  while ((m = trailerRe.exec(text))) best = { pos: m.index, dictStart: trailerRe.lastIndex - 2 };
+  var xrefObjRe = /\/Type\s*\/XRef\b/g;
+  var xm, lastX = null;
+  while ((xm = xrefObjRe.exec(text))) lastX = xm;
+  if (lastX && (!best || lastX.index > best.pos)) {
+    var objIdx = text.lastIndexOf(' obj', lastX.index);
+    var dStart = objIdx === -1 ? -1 : text.indexOf('<<', objIdx);
+    if (dStart !== -1 && dStart < lastX.index) best = { pos: lastX.index, dictStart: dStart };
+  }
+  if (!best) return '';
+  var i = best.dictStart, depth = 0;
+  while (i < text.length) {
+    if (text.substr(i, 2) === '<<') { depth++; i += 2; continue; }
+    if (text.substr(i, 2) === '>>') { depth--; i += 2; if (depth === 0) break; continue; }
+    i++;
+  }
+  return text.slice(best.dictStart, i);
+}
+
+function _pdfScanObjectOffsets_(text) {
+  var offsets = {};
+  var re = /(\d+)[ \t]+(\d+)[ \t]+obj\b/g;
+  var m;
+  while ((m = re.exec(text))) {
+    // Spätere Vorkommen (spätere Revision desselben Objekts, z.B. bei bereits
+    // inkrementell aktualisierten PDFs) überschreiben frühere - korrektes
+    // Verhalten laut PDF-Spezifikation.
+    offsets[parseInt(m[1], 10)] = m.index;
+  }
+  return offsets;
+}
+
+function _pdfExtractDictText_(text, objStart) {
+  var objKwIdx = text.indexOf('obj', objStart);
+  if (objKwIdx === -1) return null;
+  var i = objKwIdx + 3;
+  while (' \n\r\t'.indexOf(text.charAt(i)) !== -1) i++;
+  if (text.substr(i, 2) !== '<<') return null;
+  var start = i, depth = 0;
+  while (i < text.length) {
+    if (text.substr(i, 2) === '<<') { depth++; i += 2; continue; }
+    if (text.substr(i, 2) === '>>') { depth--; i += 2; if (depth === 0) break; continue; }
+    i++;
+  }
+  return { start: start, end: i };
+}
+
+function _pdfGetDictValueRef_(dictText, key) {
+  var re = new RegExp('\\/' + key + '\\s+(\\d+)\\s+(\\d+)\\s+R');
+  var m = re.exec(dictText);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function _pdfGetDictArray_(dictText, key) {
+  var re = new RegExp('\\/' + key + '\\s*\\[([\\s\\S]*?)\\]');
+  var m = re.exec(dictText);
+  return m ? m[1] : null;
+}
+
+// Liest den Inhalt (ohne Klammern) eines indirekten Array-Objekts "N 0 obj [ ... ] endobj".
+// doc (optional, siehe _pdfOpenDoc_ in PdfTextPosition.gs): findet das Objekt
+// auch in einem komprimierten Object Stream.
+function _pdfReadArrayObject_(text, offsets, num, doc) {
+  if (!(num in offsets)) {
+    var loc = doc ? _pdfDocObjStmIndex_(doc)[num] : null;
+    if (loc) {
+      var lb0 = loc.text.indexOf('[', loc.pos), rb0 = lb0 === -1 ? -1 : loc.text.indexOf(']', lb0);
+      if (rb0 !== -1) return loc.text.slice(lb0 + 1, rb0);
+    }
+    throw new Error('Annots array object ' + num + ' not found as plain text (likely inside a compressed object stream).');
+  }
+  var objKw = text.indexOf('obj', offsets[num]);
+  var endObj = text.indexOf('endobj', objKw);
+  var lb = text.indexOf('[', objKw);
+  if (objKw === -1 || lb === -1 || (endObj !== -1 && lb > endObj)) throw new Error('Object ' + num + ' is not an array.');
+  var rb = text.indexOf(']', lb);
+  if (rb === -1) throw new Error('Object ' + num + ' has an unterminated array.');
+  return text.slice(lb + 1, rb);
+}
+
+function _pdfNumList_(arr) { return arr.map(function(v) { return v.toFixed(2); }).join(' '); }
+
+function _pdfUnionBox_(boxes) {
+  var u = boxes[0].slice();
+  boxes.forEach(function(b) {
+    u[0] = Math.min(u[0], b[0]); u[1] = Math.min(u[1], b[1]);
+    u[2] = Math.max(u[2], b[2]); u[3] = Math.max(u[3], b[3]);
+  });
+  return u;
+}
+
+function _pdfGetMediaBox_(dictText) {
+  var m = /\/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s*\]/.exec(dictText);
+  if (!m) return null;
+  return [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]), parseFloat(m[4])];
+}
+
+// doc (optional): Objekte, die in einem komprimierten Object Stream liegen
+// (PDF 1.5+, z.B. Word/"Optimiertes PDF"), werden darüber gefunden.
+function _pdfResolveObject_(text, offsets, num, doc) {
+  if (!(num in offsets)) {
+    var loc = doc ? _pdfDocObjStmIndex_(doc)[num] : null;
+    if (loc) {
+      var i = _pdfSkipWs_(loc.text, loc.pos);
+      if (loc.text.substr(i, 2) === '<<') {
+        var start = i, depth = 0;
+        while (i < loc.text.length) {
+          if (loc.text.substr(i, 2) === '<<') { depth++; i += 2; continue; }
+          if (loc.text.substr(i, 2) === '>>') { depth--; i += 2; if (depth === 0) break; continue; }
+          i++;
+        }
+        return { num: num, dictText: loc.text.slice(start, i) };
+      }
+    }
+    throw new Error('Object ' + num + ' not found as plain text (likely inside a compressed object stream). This PDF\'s internal structure is not supported for direct annotation.');
+  }
+  var range = _pdfExtractDictText_(text, offsets[num]);
+  if (!range) throw new Error('Object ' + num + ' has no dictionary.');
+  return { num: num, dictText: text.slice(range.start, range.end) };
+}
+
+function _pdfCollectPages_(text, offsets, rootNum, doc) {
+  var catalog = _pdfResolveObject_(text, offsets, rootNum, doc);
+  var pagesNum = _pdfGetDictValueRef_(catalog.dictText, 'Pages');
+  if (pagesNum === null) throw new Error('Catalog has no /Pages.');
+
+  var pages = [];
+  var visited = {};
+  function walk(nodeNum, inheritedMediaBox) {
+    if (visited[nodeNum]) return; // Schutz vor Zyklen in kaputten PDFs
+    visited[nodeNum] = true;
+    var node = _pdfResolveObject_(text, offsets, nodeNum, doc);
+    var mediaBox = _pdfGetMediaBox_(node.dictText) || inheritedMediaBox;
+    var typeM = /\/Type\s*\/(\w+)/.exec(node.dictText);
+    var nodeType = typeM ? typeM[1] : null;
+    if (nodeType === 'Page') {
+      node.mediaBox = mediaBox;
+      pages.push(node);
+      return;
+    }
+    var kidsRaw = _pdfGetDictArray_(node.dictText, 'Kids');
+    if (kidsRaw === null) throw new Error('Pages node ' + nodeNum + ' has no /Kids and is not a /Page.');
+    var kidRe = /(\d+)\s+(\d+)\s+R/g;
+    var km;
+    while ((km = kidRe.exec(kidsRaw))) walk(parseInt(km[1], 10), mediaBox);
+  }
+  walk(pagesNum, null);
+  return pages;
+}
+
+/**
+ * pageAnnotations: { pageIndex(0-based): [ {rect?:[x,y,x,y], highlight?:[[x0,y0,x1,y1],...],
+ *   contents:str, title?:str}, ... ] }
+ * "rect" is the sticky-note icon position and optional - if omitted, notes are
+ * stacked in the page's top-left corner using its actual /MediaBox, so callers
+ * don't need to know page dimensions. "highlight" (optional) adds a yellow
+ * highlight annotation over exactly these boxes (one per text line).
+ * bytes: signed byte array (as returned by Blob.getBytes()).
+ * Returns a signed byte array for the new, annotated PDF (Utilities.newBlob-ready).
+ * Throws Error with a clear message if the PDF's structure can't be located in
+ * plain text (see file header comment) - callers should catch this and fall
+ * back to another output (e.g. the Sheet export).
+ */
+function buildAnnotatedPdfBytes_(bytes, pageAnnotations) {
+  var text = _pdfBytesToBinaryString_(bytes);
+
+  var rootNum = _pdfFindRootRef_(text);
+  var offsets = _pdfScanObjectOffsets_(text);
+  var doc = _pdfOpenDoc_(text, offsets);
+  var pages = _pdfCollectPages_(text, offsets, rootNum, doc);
+
+  var sxRe = /startxref\s+(\d+)/g;
+  var sxMatch, lastSx = null;
+  while ((sxMatch = sxRe.exec(text))) lastSx = sxMatch;
+  if (!lastSx) throw new Error('Could not find startxref.');
+
+  var trailerDict = _pdfLastTrailerDict_(text);
+  var maxObjNum = 0;
+  for (var k in offsets) { if (offsets.hasOwnProperty(k)) maxObjNum = Math.max(maxObjNum, parseInt(k, 10)); }
+
+  var appended = pdfAnnotationUpdate_({
+    baseLength: text.length,
+    endsWithNewline: text.charAt(text.length - 1) === '\n',
+    prevXref: parseInt(lastSx[1], 10),
+    trailerDict: trailerDict,
+    rootNum: rootNum,
+    pages: pages,
+    maxObjNum: maxObjNum,
+    readAnnotsArray: function(num) { return _pdfReadArrayObject_(text, offsets, num, doc); }
+  }, pageAnnotations);
+  return _pdfBinaryStringToBytes_(text + appended);
+}
+
+/**
+ * Kern des Incremental Updates: liefert den Text, der an die UNVERÄNDERTE
+ * Original-PDF angehängt wird (neue Annotationen, aktualisierte Seiten, neue
+ * xref + Trailer). Braucht die Original-Datei nicht im Speicher - nur deren
+ * Länge und Struktur-Informationen (ctx):
+ *   baseLength, endsWithNewline, prevXref (letztes startxref), trailerDict,
+ *   rootNum, pages ([{num, dictText, mediaBox}]), maxObjNum,
+ *   readAnnotsArray(num) -> Inhalt eines indirekten /Annots-Arrays.
+ * Dadurch funktioniert das auch für Dateien über 50 MB (siehe DriveAddon.gs).
+ */
+function pdfAnnotationUpdate_(ctx, pageAnnotations) {
+  var trailerDict = ctx.trailerDict;
+  var pages = ctx.pages;
+  var rootNum = ctx.rootNum;
+  var prevXrefOffset = ctx.prevXref;
+  // Verschluesselte PDFs: neue Annotation-Strings muessten mitverschluesselt
+  // werden, sonst ist die Datei danach kaputt -> lieber sauber abbrechen.
+  if (/\/Encrypt\b/.test(trailerDict)) throw new Error('Encrypted PDFs are not supported for annotation.');
+
+  // /Size aus dem Trailer ist massgeblich: Objekte in komprimierten Objekt-
+  // Streams tauchen im Klartext-Scan nicht auf und koennen hoehere Nummern haben
+  // -> ohne /Size drohten Kollisionen mit bestehenden Objektnummern.
+  var sizeM = /\/Size\s+(\d+)/.exec(trailerDict);
+  var trailerSize = sizeM ? parseInt(sizeM[1], 10) : 0;
+  var maxObjNum = Math.max(ctx.maxObjNum || 0, trailerSize - 1);
+  var nextNum = maxObjNum + 1;
+
+  var newObjects = [];     // [{num, body}]
+  var updatedPages = {};   // objNum -> newDictText
+
+  var pageIndexes = [];
+  for (var pIdx in pageAnnotations) { if (pageAnnotations.hasOwnProperty(pIdx)) pageIndexes.push(parseInt(pIdx, 10)); }
+  pageIndexes.sort(function(a, b) { return a - b; });
+
+  pageIndexes.forEach(function(pageIndex) {
+    if (pageIndex < 0 || pageIndex >= pages.length) return;
+    var page = pages[pageIndex];
+    var anns = pageAnnotations[pageIndex];
+    // /Annots kann direkt ein Array sein (/Annots [..]) oder eine indirekte
+    // Referenz auf ein Array-Objekt (/Annots 12 0 R). Letzteres wurde frueher nicht
+    // erkannt -> neue Notizen wurden nie an die Seite gehaengt, obwohl "Erfolg".
+    var annotsRefM = /\/Annots\s+(\d+)\s+(\d+)\s+R/.exec(page.dictText);
+    var existingAnnotsRaw;
+    if (annotsRefM) {
+      existingAnnotsRaw = ctx.readAnnotsArray(parseInt(annotsRefM[1], 10));
+    } else {
+      existingAnnotsRaw = _pdfGetDictArray_(page.dictText, 'Annots') || '';
+    }
+    var newAnnotRefs = [];
+
+    var mediaBox = page.mediaBox || [0, 0, 612, 792]; // US-Letter-Fallback, falls kein /MediaBox auffindbar war
+    var stackIdx = 0;
+    anns.forEach(function(ann) {
+      var contentsHex = _pdfHexString_(ann.contents);
+      var titleHex = _pdfHexString_(ann.title || 'Author Check');
+
+      // Exakt gefundene Textstelle: gelbe Markierung (Highlight-Annotation)
+      // über genau den betroffenen Wörtern, eine Box pro Textzeile. Trägt
+      // denselben Kommentartext, damit Acrobat & Co. ihn beim Überfahren der
+      // Markierung anzeigen. Das eigene Erscheinungsbild (/AP, "Multiply")
+      // sorgt dafür, dass auch Viewer ohne eigene Highlight-Darstellung die
+      // Markierung zeigen und der Text darunter lesbar bleibt.
+      if (ann.highlight && ann.highlight.length) {
+        var hb = _pdfUnionBox_(ann.highlight);
+        var bboxStr = _pdfNumList_(hb);
+        var quads = [], fills = [];
+        ann.highlight.forEach(function(b) {
+          // QuadPoints-Reihenfolge wie Acrobat: oben links, oben rechts, unten links, unten rechts.
+          quads.push(b[0], b[3], b[2], b[3], b[0], b[1], b[2], b[1]);
+          fills.push(_pdfNumList_([b[0], b[1], b[2] - b[0], b[3] - b[1]]) + ' re');
+        });
+        var apData = '/GS0 gs 1 0.93 0 rg\n' + fills.join('\n') + '\nf\n';
+        var apNum = nextNum++;
+        newObjects.push({ num: apNum, body:
+          '<< /Type /XObject /Subtype /Form /BBox [' + bboxStr + ']' +
+          ' /Resources << /ExtGState << /GS0 << /Type /ExtGState /BM /Multiply /ca 1 /CA 1 >> >> >>' +
+          ' /Length ' + apData.length + ' >>\nstream\n' + apData + '\nendstream' });
+        var hlNum = nextNum++;
+        newObjects.push({ num: hlNum, body:
+          '<< /Type /Annot /Subtype /Highlight /Rect [' + bboxStr + '] /QuadPoints [' + _pdfNumList_(quads) + ']' +
+          ' /Contents ' + contentsHex + ' /T ' + titleHex + ' /C [1 0.93 0] /F 4 /P ' + page.num + ' 0 R' +
+          ' /AP << /N ' + apNum + ' 0 R >> >>' });
+        newAnnotRefs.push(hlNum);
+      }
+
+      // Rect wird, falls vom Aufrufer nicht explizit vorgegeben, relativ zur
+      // tatsächlichen Seitengröße oben links gestapelt platziert (ein
+      // 20x20pt "Sprechblasen"-Icon pro Fund, mit 26pt Abstand).
+      var rect = ann.rect;
+      if (!rect) {
+        var iconSize = 20, gap = 26, margin = 16;
+        var x = mediaBox[0] + margin;
+        var y = mediaBox[3] - margin - iconSize - (stackIdx++ * gap);
+        if (y < mediaBox[1] + margin) y = mediaBox[1] + margin; // nicht unten aus der Seite laufen
+        rect = [x, y, x + iconSize, y + iconSize];
+      }
+      var annotNum = nextNum++;
+      var body =
+        '<< /Type /Annot /Subtype /Text /Rect [' + _pdfNumList_(rect) + '] /Contents ' + contentsHex +
+        ' /T ' + titleHex + ' /Name /Comment /Open false /C [1 0.93 0] >>';
+      newObjects.push({ num: annotNum, body: body });
+      newAnnotRefs.push(annotNum);
+    });
+
+    var combinedRefs = existingAnnotsRaw.replace(/^\s+|\s+$/g, '');
+    var addRefs = newAnnotRefs.map(function(n) { return n + ' 0 R'; }).join(' ');
+    var newAnnotsArray = (combinedRefs + ' ' + addRefs).replace(/^\s+|\s+$/g, '');
+
+    var newPageDict;
+    if (annotsRefM) {
+      newPageDict = page.dictText.replace(annotsRefM[0], function() { return '/Annots [' + newAnnotsArray + ']'; });
+    } else if (page.dictText.indexOf('/Annots') !== -1) {
+      newPageDict = page.dictText.replace(/\/Annots\s*\[[\s\S]*?\]/, function() { return '/Annots [' + newAnnotsArray + ']'; });
+    } else {
+      newPageDict = page.dictText.slice(0, -2) + ' /Annots [' + newAnnotsArray + '] ' + page.dictText.slice(-2);
+    }
+    updatedPages[page.num] = newPageDict;
+  });
+
+  if (!newObjects.length) throw new Error('No matching pages to annotate.');
+
+  var out = [];
+  if (!ctx.endsWithNewline) out.push('\n');
+
+  var offsetsNew = {};
+  var curLen = ctx.baseLength + (ctx.endsWithNewline ? 0 : 1);
+
+  newObjects.forEach(function(o) {
+    offsetsNew[o.num] = curLen;
+    var chunk = o.num + ' 0 obj\n' + o.body + '\nendobj\n';
+    out.push(chunk);
+    curLen += chunk.length;
+  });
+  for (var pageNumKey in updatedPages) {
+    if (!updatedPages.hasOwnProperty(pageNumKey)) continue;
+    var pageNum = parseInt(pageNumKey, 10);
+    offsetsNew[pageNum] = curLen;
+    var chunk2 = pageNum + ' 0 obj\n' + updatedPages[pageNumKey] + '\nendobj\n';
+    out.push(chunk2);
+    curLen += chunk2.length;
+  }
+
+  var allNewNums = [];
+  for (var nk in offsetsNew) { if (offsetsNew.hasOwnProperty(nk)) allNewNums.push(parseInt(nk, 10)); }
+  allNewNums.sort(function(a, b) { return a - b; });
+
+  var xrefOffset = curLen;
+  var size = Math.max(maxObjNum, allNewNums[allNewNums.length - 1]) + 1;
+
+  var xrefChunk = 'xref\n';
+  var i = 0;
+  while (i < allNewNums.length) {
+    var j = i;
+    while (j + 1 < allNewNums.length && allNewNums[j + 1] === allNewNums[j] + 1) j++;
+    var runStart = allNewNums[i], runLen = j - i + 1;
+    xrefChunk += runStart + ' ' + runLen + '\n';
+    for (var n = runStart; n < runStart + runLen; n++) {
+      var offStr = String(offsetsNew[n]);
+      while (offStr.length < 10) offStr = '0' + offStr;
+      xrefChunk += offStr + ' 00000 n \n';
+    }
+    i = j + 1;
+  }
+  // /Info (Metadaten) und /ID aus dem bisherigen Trailer uebernehmen - sonst
+  // gehen Titel/Autor verloren und manche Viewer melden eine veraenderte Datei.
+  var infoM = /\/Info\s+\d+\s+\d+\s+R/.exec(trailerDict);
+  var idM = /\/ID\s*\[[^\]]*\]/.exec(trailerDict);
+  xrefChunk += 'trailer\n<< /Size ' + size + ' /Root ' + rootNum + ' 0 R' +
+    (infoM ? ' ' + infoM[0] : '') + (idM ? ' ' + idM[0] : '') +
+    ' /Prev ' + prevXrefOffset + ' >>\n';
+  xrefChunk += 'startxref\n' + xrefOffset + '\n%%EOF';
+  out.push(xrefChunk);
+
+  return out.join('');
+}
+
+/**
+ * Best-effort: liest aus dem von Gemini gelieferten "location"-Hinweis
+ * (z.B. "page 2", "Seite 3", "p. 4") eine Seitenzahl heraus. Liefert einen
+ * 0-basierten Seitenindex oder null, wenn nichts Brauchbares gefunden wurde
+ * (Aufrufer verteilt solche Fälle dann z.B. auf die erste Seite).
+ */
+function _pdfGuessPageIndex_(location) {
+  if (!location) return null;
+  var m = /(?:page|seite|s\.|p\.)\s*(\d+)/i.exec(location);
+  if (!m) m = /(\d+)/.exec(location);
+  if (!m) return null;
+  var n = parseInt(m[1], 10);
+  return (isNaN(n) || n < 1) ? null : (n - 1);
+}
+// ---- PdfShrink.js ----
+// ============================================================================
+// GROSSE PDFs FÜR DEN CHECK VERKLEINERN (Bilder entfernen)
+// ============================================================================
+// Gemini nimmt eine PDF nur bis ca. 20 MB pro Anfrage an, und Apps Script kann
+// Dateien über 50 MB gar nicht als Ganzes laden. Große Anleitungen sind aber
+// fast immer wegen der BILDER so groß - für Grammatik/Terminologie/Stil werden
+// die nicht gebraucht.
+//
+// Vorgehen:
+//  1. Nur das Ende der Datei laden und daraus die Cross-Reference-Tabelle lesen
+//     (Verzeichnis: welches Objekt steht an welcher Byte-Position).
+//  2. Die Objekte der Reihe nach per HTTP-Range-Anfrage direkt aus Drive lesen.
+//     Von jedem Objekt werden zuerst nur die ersten Bytes geholt: ist es ein
+//     Bild (oder ein eingebetteter Dateianhang), wird der Rest gar nicht erst
+//     heruntergeladen, sondern durch einen unsichtbaren 1x1-Platzhalter ersetzt.
+//  3. Alle übrigen Objekte (Text, Schriften, Seitenaufbau) werden Byte für Byte
+//     unverändert übernommen, dazu eine neue Cross-Reference geschrieben.
+//
+// Die Objektnummern bleiben gleich, dadurch bleiben alle Verweise innerhalb der
+// PDF gültig. Das Ergebnis dient NUR dem Check (wird an Gemini geschickt) und
+// wird nirgends gespeichert.
+
+var PDF_SHRINK_CHUNK = 8 * 1024 * 1024;   // Größe einer Range-Anfrage an Drive
+var PDF_SHRINK_PEEK = 4096;                // so viel wird von großen Objekten vorab gelesen
+var PDF_SHRINK_BIG = 128 * 1024;           // ab dieser Größe: erst anschauen, dann ggf. überspringen
+var PDF_SHRINK_PARALLEL = 64;              // gleichzeitige Range-Anfragen
+
+/**
+ * Liest Byte-Bereiche einer Drive-Datei per HTTP-Range, ohne die ganze Datei zu
+ * laden. read(start, end) liefert [start, end) als Binärstring (1 Zeichen = 1 Byte).
+ */
+function _pdfDriveRangeReader_(fileId, size) {
+  var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) +
+    '?alt=media&supportsAllDrives=true';
+  var token = ScriptApp.getOAuthToken();
+  return {
+    size: size,
+    read: function(start, end) {
+      end = Math.min(end, size);
+      if (start >= end) return '';
+      var res = UrlFetchApp.fetch(url, {
+        headers: { Authorization: 'Bearer ' + token, Range: 'bytes=' + start + '-' + (end - 1) },
+        muteHttpExceptions: true
+      });
+      var code = res.getResponseCode();
+      if (code !== 206 && code !== 200) throw new Error('Drive download failed (HTTP ' + code + ').');
+      // ISO-8859-1 bildet jedes Byte 1:1 auf ein Zeichen 0..255 ab.
+      var s = res.getContentText('ISO-8859-1');
+      if (code === 200 && s.length > end - start) s = s.slice(start, end); // Range ignoriert
+      return s;
+    },
+    // Mehrere Bereiche PARALLEL laden (UrlFetchApp.fetchAll) - [[start, end], ...].
+    readMany: function(ranges) {
+      var out = [];
+      for (var i = 0; i < ranges.length; i += PDF_SHRINK_PARALLEL) {
+        var batch = ranges.slice(i, i + PDF_SHRINK_PARALLEL);
+        var responses = UrlFetchApp.fetchAll(batch.map(function(r) {
+          return { url: url, headers: { Authorization: 'Bearer ' + token, Range: 'bytes=' + r[0] + '-' + (Math.min(r[1], size) - 1) },
+                   muteHttpExceptions: true };
+        }));
+        responses.forEach(function(res, k) {
+          var code = res.getResponseCode();
+          if (code !== 206) throw new Error('Drive download failed (HTTP ' + code + ').');
+          var txt = res.getContentText('ISO-8859-1');
+          if (txt.length !== Math.min(batch[k][1], size) - batch[k][0]) throw new Error('Drive download returned an unexpected length.');
+          out.push(txt);
+        });
+      }
+      return out;
+    }
+  };
+}
+
+// PNG-Prädiktor rückgängig machen (xref-Streams nutzen fast immer /Predictor 12).
+function _pdfPngUnpredict_(data, columns) {
+  var rowLen = columns + 1, out = [];
+  var prev = [];
+  for (var k = 0; k < columns; k++) prev.push(0);
+  for (var r = 0; r + rowLen <= data.length; r += rowLen) {
+    var type = data.charCodeAt(r), row = new Array(columns);
+    for (var i = 0; i < columns; i++) {
+      var x = data.charCodeAt(r + 1 + i);
+      var a = i > 0 ? row[i - 1] : 0, b = prev[i], c = i > 0 ? prev[i - 1] : 0, v;
+      if (type === 1) v = x + a;
+      else if (type === 2) v = x + b;
+      else if (type === 3) v = x + ((a + b) >> 1);
+      else if (type === 4) {
+        var p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        v = x + ((pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c));
+      } else v = x;
+      row[i] = v & 255;
+    }
+    for (var j = 0; j < columns; j++) out.push(String.fromCharCode(row[j]));
+    prev = row;
+  }
+  return out.join('');
+}
+
+function _pdfStringToSignedBytes_(s) {
+  var out = new Array(s.length);
+  for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i) & 0xFF; out[i] = c > 127 ? c - 256 : c; }
+  return out;
+}
+
+/**
+ * Liest die komplette Cross-Reference (klassische Tabelle und/oder xref-Stream,
+ * inkl. /Prev-Kette früherer Revisionen). Liefert
+ * { entries: {num: {t:0|1|2, off, gen, stm, idx}}, trailer: dictText, sections: [offsets] }.
+ */
+function _pdfShrinkReadXref_(reader) {
+  var tailLen = Math.min(reader.size, 64 * 1024);
+  var tail = reader.read(reader.size - tailLen, reader.size);
+  var re = /startxref\s+(\d+)/g, m, last = null;
+  while ((m = re.exec(tail))) last = m;
+  if (!last) throw new Error('startxref not found.');
+
+  var entries = {}, trailer = null, sections = [], seen = {};
+  var queue = [parseInt(last[1], 10)];
+
+  // Liest ab off, bis marker (inkl. etwas Nachlauf) im Fenster steht.
+  function readUntil(off, marker) {
+    var len = 64 * 1024, s;
+    while (true) {
+      s = reader.read(off, off + len);
+      var idx = s.indexOf(marker);
+      if (idx !== -1 && idx + marker.length + 4096 <= s.length) return s;
+      if (off + len >= reader.size) return s;
+      len *= 4;
+      if (len > 64 * 1024 * 1024) throw new Error('Cross-reference section too large.');
+    }
+  }
+  function setEntry(num, e) { if (!entries.hasOwnProperty(num)) entries[num] = e; }
+
+  while (queue.length) {
+    var off = queue.shift();
+    if (seen[off] || off < 0 || off >= reader.size) continue;
+    seen[off] = true;
+    sections.push(off);
+
+    var head = reader.read(off, off + 16);
+    var dictText;
+    if (/^\s*xref/.test(head)) {
+      var s = readUntil(off, 'trailer');
+      var tIdx = s.indexOf('trailer');
+      if (tIdx === -1) throw new Error('xref table without trailer.');
+      var table = s.slice(s.indexOf('xref') + 4, tIdx);
+      // Tokens: "erste anzahl" (Unterabschnitt) oder "offset gen n|f" (Eintrag).
+      var tokRe = /\s*(\d+)\s+(\d+)(?:[ \t]+([nf]))?/y, tm, cur = 0;
+      while ((tm = tokRe.exec(table))) {
+        if (tm[3] === 'n') setEntry(cur++, { t: 1, off: parseInt(tm[1], 10), gen: parseInt(tm[2], 10) });
+        else if (tm[3] === 'f') setEntry(cur++, { t: 0 });
+        else cur = parseInt(tm[1], 10);
+      }
+      var dStart = s.indexOf('<<', tIdx);
+      var dict = _pdfParseValue_(s, dStart, true);
+      dictText = s.slice(dStart, dict.next);
+      if (!trailer) trailer = dictText;
+      var xrefStmM = /\/XRefStm\s+(\d+)/.exec(dictText);
+      if (xrefStmM) queue.unshift(parseInt(xrefStmM[1], 10)); // hybride Datei: Stream-Einträge zuerst
+    } else {
+      var so = readUntil(off, 'endstream');
+      var objKw = so.indexOf('obj');
+      var dStart2 = so.indexOf('<<', objKw);
+      var parsed = _pdfParseValue_(so, dStart2, true);
+      dictText = so.slice(dStart2, parsed.next);
+      var d = parsed.v && parsed.v.d;
+      if (!d || !d.Type || d.Type.n !== 'XRef') throw new Error('startxref does not point to a cross-reference.');
+      if (!trailer) trailer = dictText;
+
+      var sKw = so.indexOf('stream', parsed.next);
+      var dataStart = sKw + 6;
+      if (so.charAt(dataStart) === '\r') dataStart++;
+      if (so.charAt(dataStart) === '\n') dataStart++;
+      var dataEnd = typeof d.Length === 'number' ? dataStart + d.Length : so.indexOf('endstream', dataStart);
+      var filters = [];
+      if (d.Filter && d.Filter.n) filters.push(d.Filter.n);
+      else if (Array.isArray(d.Filter)) d.Filter.forEach(function(f) { if (f && f.n) filters.push(f.n); });
+      var data = _pdfDecodeStreamToText_({ rawBytes: _pdfStringToSignedBytes_(so.slice(dataStart, dataEnd)), filters: filters });
+
+      var W = d.W || [1, 2, 1];
+      var rowW = W[0] + W[1] + W[2];
+      var parms = Array.isArray(d.DecodeParms) ? d.DecodeParms[0] : d.DecodeParms;
+      if (parms && parms.d && parms.d.Predictor >= 10) data = _pdfPngUnpredict_(data, parms.d.Columns || rowW);
+
+      var index = Array.isArray(d.Index) ? d.Index : [0, d.Size];
+      var p = 0;
+      function field(w, dflt) {
+        if (!w) return dflt;
+        var v = 0;
+        for (var b = 0; b < w; b++) v = v * 256 + data.charCodeAt(p++);
+        return v;
+      }
+      for (var ii = 0; ii + 1 < index.length; ii += 2) {
+        for (var n = 0; n < index[ii + 1]; n++) {
+          if (p + rowW > data.length) break;
+          var type = field(W[0], 1), f2 = field(W[1], 0), f3 = field(W[2], 0);
+          var num = index[ii] + n;
+          if (type === 1) setEntry(num, { t: 1, off: f2, gen: f3 });
+          else if (type === 2) setEntry(num, { t: 2, stm: f2, idx: f3 });
+          else setEntry(num, { t: 0 });
+        }
+      }
+    }
+    var prevM = /\/Prev\s+(\d+)/.exec(dictText);
+    if (prevM) queue.push(parseInt(prevM[1], 10));
+  }
+  return { entries: entries, trailer: trailer || '', sections: sections };
+}
+
+/** Leser für eine PDF, die schon als Binärstring im Speicher liegt. */
+function _pdfStringReader_(text) {
+  return {
+    size: text.length,
+    read: function(a, b) { return text.slice(a, Math.min(b, text.length)); },
+    readMany: function(ranges) { return ranges.map(function(r) { return text.slice(r[0], Math.min(r[1], text.length)); }); }
+  };
+}
+
+// Unsichtbarer Platzhalter für ein entferntes Bild: 1x1-Stencil-Maske, deren
+// einziges Pixel nicht malt. Für Soft-Masks (/SMask) stattdessen ein deckendes
+// 1x1-Graustufenbild, weil eine SMask ein Graustufenbild sein muss.
+function _pdfImagePlaceholder_(num, gen, asSoftMask) {
+  var dict = asSoftMask
+    ? '<< /Type /XObject /Subtype /Image /ColorSpace /DeviceGray /BitsPerComponent 8 /Width 1 /Height 1 /Length 1 >>'
+    : '<< /Type /XObject /Subtype /Image /ImageMask true /Width 1 /Height 1 /BitsPerComponent 1 /Length 1 >>';
+  return num + ' ' + gen + ' obj\n' + dict + '\nstream\n\u00FF\nendstream\nendobj\n';
+}
+
+/**
+ * Baut die PDF (gelesen über reader, siehe _pdfDriveRangeReader_ /
+ * _pdfStringReader_) als saubere, einteilige Datei neu auf. Bilder werden nach
+ * Größe aufsteigend behalten, solange sie zusammen in opts.imageBudget (Bytes,
+ * Standard: alle) passen - kleine Bilder wie Piktogramme und Warnsymbole
+ * bleiben also zuerst erhalten, große Fotos fallen zuerst weg. Eingebettete
+ * Dateianhänge werden immer entfernt.
+ *
+ * Liefert ein "Modell" der neuen Datei:
+ * { text, offsets: {num: pos}, compressed: {num: {stm, idx}}, rootNum, maxNum,
+ *   trailerExtra, imagesRemoved, imagesKept, bytesRead }
+ *
+ * Läuft in einem Stück. Für große Dateien im Drive-Add-on gibt es dieselben
+ * Stufen einzeln (_pdfShrinkPlan_ ... _pdfShrinkFinish_), damit sie über mehrere
+ * Add-on-Aktionen verteilt werden können (siehe _drivePdfPrepStep_ in DriveAddon.gs).
+ */
+function pdfRebuild_(reader, opts) {
+  opts = opts || {};
+  var budget = opts.imageBudget === undefined ? Infinity : opts.imageBudget;
+  var plan = _pdfShrinkPlan_(reader);
+  var texts = reader.readMany(plan.ranges.map(function(r) { return [r[0], r[1]]; }));
+  var bytesRead = 0;
+  texts.forEach(function(t) { bytesRead += t.length; });
+
+  var kept = {}, images = {}, fullNeeded = [];
+  plan.ranges.forEach(function(r, ri) {
+    var c = _pdfShrinkClassify_(r, texts[ri]);
+    for (var k in c.kept) if (c.kept.hasOwnProperty(k)) kept[k] = c.kept[k];
+    for (var i in c.images) if (c.images.hasOwnProperty(i)) images[i] = c.images[i];
+    Array.prototype.push.apply(fullNeeded, c.fullNeeded);
+  });
+  texts = null;
+
+  var sel = _pdfShrinkSelectImages_(images, budget);
+  for (var pk in sel.kept) if (sel.kept.hasOwnProperty(pk)) kept[pk] = sel.kept[pk];
+  sel.keepFromImage.forEach(function(num) { kept[num] = images[num].text; });
+  Array.prototype.push.apply(fullNeeded, sel.fullNeeded);
+
+  var full = _pdfShrinkFullRanges_(fullNeeded);
+  var parts = full.ranges.length ? reader.readMany(full.ranges) : [];
+  var joined = fullNeeded.map(function() { return []; });
+  parts.forEach(function(t, k) { bytesRead += t.length; joined[full.owners[k]].push(t); });
+  fullNeeded.forEach(function(o, idx) { kept[o[0]] = _pdfShrinkKeepText_(joined[idx].join('')); });
+
+  var model = _pdfShrinkFinish_(plan, kept);
+  model.imagesRemoved = sel.imagesRemoved;
+  model.imagesKept = sel.imagesKept;
+  model.bytesRead = bytesRead;
+  return model;
+}
+
+// Objekte werden kompakt als [num, off, end, gen] geführt (passt so auch in den
+// JSON-Zwischenstand der etappenweisen Vorbereitung).
+
+/**
+ * Stufe 1: Cross-Reference lesen und Lesebereiche planen. Liefert
+ * { ranges: [[start, readEnd, [obj, ...]], ...], compressed, maxNum, trailer,
+ *   sections, size }.
+ */
+function _pdfShrinkPlan_(reader) {
+  var xr = _pdfShrinkReadXref_(reader);
+  var objs = [], maxNum = 0, compressed = {};
+  for (var key in xr.entries) {
+    if (!xr.entries.hasOwnProperty(key)) continue;
+    var num = parseInt(key, 10), e = xr.entries[key];
+    if (num > maxNum) maxNum = num;
+    if (e.t === 1 && num > 0) objs.push({ num: num, off: e.off, gen: e.gen });
+    else if (e.t === 2) compressed[num] = { stm: e.stm, idx: e.idx };
+  }
+  if (!objs.length) throw new Error('No objects found in the PDF.');
+
+  // Ende jedes Objekts = Beginn des nächsten bekannten Abschnitts.
+  var bounds = objs.map(function(o) { return o.off; }).concat(xr.sections, [reader.size]);
+  bounds.sort(function(a, b) { return a - b; });
+  objs.sort(function(a, b) { return a.off - b.off; });
+  var bi = 0;
+  objs.forEach(function(o) {
+    while (bi < bounds.length && bounds[bi] <= o.off) bi++;
+    o.end = bi < bounds.length ? bounds[bi] : reader.size;
+  });
+
+  // Lesestrategie (Laufzeit!): aufeinanderfolgende kleine Objekte werden zu
+  // einem Bereich zusammengefasst; ein großes Objekt schließt den Bereich mit
+  // nur seinen ersten PDF_SHRINK_PEEK Bytes ab. Alle Bereiche werden parallel
+  // geladen. Große Objekte werden erst danach - und nur falls sie gebraucht
+  // werden - komplett nachgeladen. Entfernte Bilder werden nie heruntergeladen.
+  var ranges = [], cur = null;
+  objs.forEach(function(o) {
+    var big = o.end - o.off > PDF_SHRINK_BIG;
+    var need = big ? o.off + PDF_SHRINK_PEEK : o.end;
+    var obj = [o.num, o.off, o.end, o.gen];
+    if (cur && cur.end === o.off && need - cur.start <= PDF_SHRINK_CHUNK) {
+      cur.end = big ? o.end : need; // bei "big" ist der Bereich danach abgeschlossen
+      cur.readEnd = need;
+      cur.objs.push(obj);
+    } else {
+      cur = { start: o.off, end: big ? o.end : need, readEnd: need, objs: [obj] };
+      ranges.push(cur);
+    }
+    if (big) cur = null;
+  });
+  return {
+    ranges: ranges.map(function(r) { return [r.start, r.readEnd, r.objs]; }),
+    compressed: compressed, maxNum: maxNum, trailer: xr.trailer, sections: xr.sections, size: reader.size
+  };
+}
+
+function _pdfShrinkKeepText_(full) {
+  var endIdx = full.lastIndexOf('endobj');
+  return (endIdx !== -1 ? full.slice(0, endIdx + 6) : full).replace(/^\s+/, '') + '\n';
+}
+
+/**
+ * Stufe 2: einen gelesenen Bereich (range aus _pdfShrinkPlan_, t = gelesener
+ * Text) einordnen. Liefert { kept: {num: text}, images: {num: {o, size, smask,
+ * text|null}}, fullNeeded: [obj] } - fullNeeded sind große Nicht-Bild-Objekte,
+ * die komplett nachgeladen werden müssen.
+ */
+function _pdfShrinkClassify_(range, t) {
+  var start = range[0], readEnd = range[1];
+  var out = { kept: {}, images: {}, fullNeeded: [] };
+  range[2].forEach(function(o) {
+    var num = o[0], off = o[1], end = o[2], gen = o[3];
+    var avail = t.slice(off - start, Math.min(end, readEnd) - start);
+    var complete = end <= readEnd;
+    var head = avail.slice(0, PDF_SHRINK_PEEK);
+    var hm = /^\s*(\d+)\s+(\d+)\s+obj\b/.exec(head);
+    if (!hm || parseInt(hm[1], 10) !== num) throw new Error('Object ' + num + ' not found at its xref offset.');
+    var parsed = _pdfParseValue_(head, hm[0].length, true);
+    var d = parsed.v && parsed.v.d;
+    var isStream = d && /^\s*stream/.test(head.slice(parsed.next));
+    var subtype = d && d.Subtype && d.Subtype.n, type = d && d.Type && d.Type.n;
+    if (isStream && subtype === 'Image') {
+      out.images[num] = { o: o, size: end - off, smask: (d.SMask && d.SMask.r) || null, text: complete ? _pdfShrinkKeepText_(avail) : null };
+    } else if (isStream && type === 'EmbeddedFile') {
+      out.kept[num] = num + ' ' + gen + ' obj\n<< /Type /EmbeddedFile /Length 0 >>\nstream\n\nendstream\nendobj\n';
+    } else if (complete) {
+      out.kept[num] = _pdfShrinkKeepText_(avail);
+    } else {
+      out.fullNeeded.push(o);
+    }
+  });
+  return out;
+}
+
+/**
+ * Stufe 3: Bilder auswählen (Bild + zugehörige Soft-Mask zählen gemeinsam).
+ * images: {num: {o, size, smask, text|ref}} - "vollständig vorhanden" heißt
+ * text !== null oder ref gesetzt. Liefert { kept: {num: Platzhaltertext},
+ * keepFromImage: [num] (vollständig gelesene, behaltene Bilder), fullNeeded:
+ * [obj] (behaltene, noch nachzuladende Bilder), imagesKept, imagesRemoved }.
+ */
+function _pdfShrinkSelectImages_(images, budget) {
+  function have(img) { return img.text != null || img.ref != null; }
+  var out = { kept: {}, keepFromImage: [], fullNeeded: [], imagesKept: 0, imagesRemoved: 0 };
+  var isSoftMask = {};
+  for (var ik in images) if (images.hasOwnProperty(ik) && images[ik].smask && images[images[ik].smask]) isSoftMask[images[ik].smask] = true;
+  var candidates = [];
+  for (var ik2 in images) {
+    if (!images.hasOwnProperty(ik2) || isSoftMask[ik2]) continue;
+    var img = images[ik2];
+    var sm = img.smask && images[img.smask] ? images[img.smask] : null;
+    candidates.push({ main: img, mask: sm, size: img.size + (sm ? sm.size : 0) });
+  }
+  candidates.sort(function(a, b) { return a.size - b.size; });
+  var used = 0, handled = {};
+  function keep(m) {
+    handled[m.o[0]] = true;
+    if (have(m)) out.keepFromImage.push(m.o[0]); else out.fullNeeded.push(m.o);
+  }
+  candidates.forEach(function(c) {
+    var members = c.mask ? [c.main, c.mask] : [c.main];
+    if (used + c.size <= budget) {
+      used += c.size;
+      out.imagesKept++;
+      members.forEach(keep);
+    } else {
+      out.imagesRemoved++;
+      members.forEach(function(m) {
+        handled[m.o[0]] = true;
+        out.kept[m.o[0]] = _pdfImagePlaceholder_(m.o[0], m.o[3], m === c.mask);
+      });
+    }
+  });
+  // Soft-Masks ohne auffindbares Elternbild: wie ein normales Bild behandeln (behalten).
+  for (var ik3 in images) {
+    if (images.hasOwnProperty(ik3) && !handled[ik3]) keep(images[ik3]);
+  }
+  return out;
+}
+
+/**
+ * Stufe 4 (Planung): Lesebereiche, um große Objekte komplett nachzuladen (ggf.
+ * in mehreren Teilen). Liefert { ranges: [[start, end]], owners: [Index in objs] }.
+ */
+function _pdfShrinkFullRanges_(objs) {
+  var ranges = [], owners = [];
+  objs.forEach(function(o, idx) {
+    for (var p = o[1]; p < o[2]; p += PDF_SHRINK_CHUNK) {
+      ranges.push([p, Math.min(o[2], p + PDF_SHRINK_CHUNK)]);
+      owners.push(idx);
+    }
+  });
+  return { ranges: ranges, owners: owners };
+}
+
+/** Stufe 5: aus allen behaltenen Objekttexten die neue PDF schreiben. */
+function _pdfShrinkFinish_(plan, kept) {
+  var maxNum = plan.maxNum;
+  var rootM = /\/Root\s+(\d+)\s+\d+\s+R/.exec(plan.trailer);
+  if (!rootM) throw new Error('No /Root in the PDF trailer.');
+  var infoM = /\/Info\s+\d+\s+\d+\s+R/.exec(plan.trailer);
+  var encM = /\/Encrypt\s+\d+\s+\d+\s+R/.exec(plan.trailer);
+  var idM = /\/ID\s*\[[^\]]*\]/.exec(plan.trailer);
+  var sizeM = /\/Size\s+(\d+)/.exec(plan.trailer);
+  maxNum = Math.max(maxNum, sizeM ? parseInt(sizeM[1], 10) - 1 : 0);
+  var trailerExtra = (infoM ? ' ' + infoM[0] : '') + (encM ? ' ' + encM[0] : '') + (idM ? ' ' + idM[0] : '');
+
+  var written = _pdfWriteObjects_(kept, plan.compressed, parseInt(rootM[1], 10), trailerExtra, maxNum);
+  return {
+    text: written.text, offsets: written.offsets, compressed: plan.compressed,
+    rootNum: parseInt(rootM[1], 10), maxNum: maxNum, trailerExtra: trailerExtra, encrypted: !!encM,
+    // Struktur der ORIGINAL-Datei (für Incremental Updates an großen PDFs, siehe DriveAddon.gs)
+    origStartxref: plan.sections[0], origTrailer: plan.trailer
+  };
+}
+
+/**
+ * Schreibt eine vollständige PDF: objTexts {num: "N G obj ... endobj\n"},
+ * compressed {num: {stm, idx}} (Objekte in Object Streams), dazu ein
+ * Cross-Reference-STREAM (nur der kann Object-Stream-Einträge aufnehmen).
+ */
+function _pdfWriteObjects_(objTexts, compressed, rootNum, trailerExtra, maxNum) {
+  var header = '%PDF-1.7\n%\u00E2\u00E3\u00CF\u00D3\n';
+  var out = [header], pos = header.length, offsets = {}, gens = {};
+  var nums = Object.keys(objTexts).map(Number).sort(function(a, b) { return a - b; });
+  nums.forEach(function(n) {
+    offsets[n] = pos;
+    var gm = /^\s*\d+\s+(\d+)\s+obj/.exec(objTexts[n]);
+    gens[n] = gm ? parseInt(gm[1], 10) : 0;
+    out.push(objTexts[n]);
+    pos += objTexts[n].length;
+    if (n > maxNum) maxNum = n;
+  });
+  for (var c in compressed) if (compressed.hasOwnProperty(c) && +c > maxNum) maxNum = +c;
+  var xrefNum = maxNum + 1;
+  function be(v, w) { var s = ''; for (var i = w - 1; i >= 0; i--) s += String.fromCharCode(Math.floor(v / Math.pow(256, i)) & 255); return s; }
+  var rows = [];
+  for (var n = 0; n <= xrefNum; n++) {
+    if (n === xrefNum) rows.push('\u0001' + be(pos, 4) + be(0, 2));
+    else if (n === 0) rows.push('\u0000' + be(0, 4) + be(65535, 2));
+    else if (offsets.hasOwnProperty(n)) rows.push('\u0001' + be(offsets[n], 4) + be(gens[n], 2));
+    else if (compressed.hasOwnProperty(n)) rows.push('\u0002' + be(compressed[n].stm, 4) + be(compressed[n].idx, 2));
+    else rows.push('\u0000' + be(0, 4) + be(0, 2));
+  }
+  var xdata = rows.join('');
+  out.push(xrefNum + ' 0 obj\n<< /Type /XRef /Size ' + (xrefNum + 1) + ' /W [1 4 2] /Index [0 ' + (xrefNum + 1) + ']' +
+    ' /Root ' + rootNum + ' 0 R' + trailerExtra + ' /Length ' + xdata.length + ' >>\nstream\n' + xdata +
+    '\nendstream\nendobj\nstartxref\n' + pos + '\n%%EOF\n');
+  return { text: out.join(''), offsets: offsets };
+}
+
+// ============================================================================
+// PDF IN SEITENPAKETE AUFTEILEN (für parallele Gemini-Anfragen)
+// ============================================================================
+// Eine Add-on-Aktion darf nur ca. 30-45 Sekunden laufen. Ein ganzes Handbuch in
+// EINER Gemini-Anfrage dauert länger - deshalb wird die PDF in Seitenpakete
+// aufgeteilt, die gleichzeitig geprüft werden. Jedes Paket ist eine eigene,
+// kompakte PDF mit nur den Objekten, die seine Seiten tatsächlich brauchen
+// (Schriften, Bilder, ...). Geerbte Seiteneigenschaften (/Resources,
+// /MediaBox ...) werden in die Seiten übernommen, weil sie einen neuen
+// Elternknoten bekommen; Verweise auf andere Seiten (Links /Annots,
+// Lesezeichen, Strukturbaum) werden weggelassen, damit nicht das ganze
+// Dokument mitgezogen wird.
+
+function _pdfSerialize_(v) {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'number') return String(Math.round(v * 1e6) / 1e6);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (Array.isArray(v)) return '[' + v.map(_pdfSerialize_).join(' ') + ']';
+  if (v.r !== undefined) return v.r + ' 0 R';
+  if (v.n !== undefined) {
+    return '/' + v.n.replace(/[^!-~]|[#()<>\[\]{}\/%]/g, function(c) {
+      var h = c.charCodeAt(0).toString(16); return '#' + (h.length < 2 ? '0' + h : h);
+    });
+  }
+  if (v.s !== undefined) {
+    var hex = '';
+    for (var i = 0; i < v.s.length; i++) { var h2 = (v.s.charCodeAt(i) & 255).toString(16); hex += h2.length < 2 ? '0' + h2 : h2; }
+    return '<' + hex + '>';
+  }
+  if (v.d) {
+    var parts = [];
+    for (var k in v.d) if (v.d.hasOwnProperty(k)) parts.push(_pdfSerialize_({ n: k }) + ' ' + _pdfSerialize_(v.d[k]));
+    return '<< ' + parts.join(' ') + ' >>';
+  }
+  return 'null';
+}
+
+/**
+ * Teilt die neu aufgebaute PDF (model aus pdfRebuild_) in Seitenpakete.
+ * Liefert { pageCount, build(from, to) -> Binärstring } (Seiten 0-basiert, to exklusiv).
+ */
+function pdfPageSplitter_(model) {
+  if (model.encrypted) throw new Error('Encrypted PDFs cannot be split.');
+  var text = model.text;
+  var doc = _pdfOpenDoc_(text, model.offsets);
+  var pages = _pdfCollectPages_(text, model.offsets, model.rootNum, doc);
+
+  // Verweise, die ein Objekt enthält (bei Streams nur im Dictionary).
+  function refsIn(s) {
+    var out = [], re = /(\d+)\s+(\d+)\s+R(?![A-Za-z])/g, m;
+    while ((m = re.exec(s))) out.push(parseInt(m[1], 10));
+    return out;
+  }
+  var refCache = {};
+  function refsOf(num) {
+    if (refCache.hasOwnProperty(num)) return refCache[num];
+    var refs = [];
+    if (model.offsets.hasOwnProperty(num)) {
+      var start = model.offsets[num];
+      var objKw = text.indexOf('obj', start);
+      var val = _pdfParseValue_(text, objKw + 3, true);
+      refs = refsIn(text.slice(objKw + 3, val.next));
+    } else if (model.compressed.hasOwnProperty(num)) {
+      var loc = _pdfDocObjStmIndex_(doc)[num];
+      if (loc) refs = refsIn(loc.text.slice(loc.pos, _pdfParseValue_(loc.text, loc.pos, true).next));
+    }
+    refCache[num] = refs;
+    return refs;
+  }
+  function objText(num) {
+    var start = model.offsets[num];
+    var end = text.indexOf('endobj', start);
+    return text.slice(start, end + 6) + '\n';
+  }
+
+  var INHERITED = ['Resources', 'MediaBox', 'CropBox', 'Rotate'];
+  function pageDictFor(page, newParent) {
+    var pageObj = _pdfDocObj_(doc, page.num);
+    var dict = page.dictText
+      .replace(/\/Parent\s+\d+\s+\d+\s+R/, '/Parent ' + newParent + ' 0 R')
+      .replace(/\/(Annots|B|Thumb)\s+\d+\s+\d+\s+R/g, '')
+      .replace(/\/(Annots|B)\s*\[[^\]]*\]/g, '');
+    var extra = '';
+    INHERITED.forEach(function(key) {
+      if (pageObj && pageObj.d && pageObj.d.hasOwnProperty(key)) return;
+      var node = pageObj ? _pdfDocGet_(doc, pageObj, 'Parent') : null;
+      for (var depth = 0; node && depth < 32; depth++) {
+        if (node.d && node.d.hasOwnProperty(key)) { extra += ' /' + key + ' ' + _pdfSerialize_(node.d[key]); return; }
+        node = _pdfDocGet_(doc, node, 'Parent');
+      }
+    });
+    return dict.slice(0, -2) + extra + ' >>';
+  }
+
+  return {
+    pageCount: pages.length,
+    build: function(from, to) {
+      var pagesNum = model.maxNum + 1, catNum = model.maxNum + 2;
+      var overrides = {}, kids = [];
+      for (var i = from; i < to && i < pages.length; i++) {
+        kids.push(pages[i].num + ' 0 R');
+        overrides[pages[i].num] = pages[i].num + ' 0 obj\n' + pageDictFor(pages[i], pagesNum) + '\nendobj\n';
+      }
+      overrides[pagesNum] = pagesNum + ' 0 obj\n<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + kids.length + ' >>\nendobj\n';
+      overrides[catNum] = catNum + ' 0 obj\n<< /Type /Catalog /Pages ' + pagesNum + ' 0 R >>\nendobj\n';
+
+      // Alle von den Seiten aus erreichbaren Objekte einsammeln.
+      var objTexts = {}, comp = {}, seen = {}, queue = [catNum];
+      while (queue.length) {
+        var n = queue.pop();
+        if (seen[n]) continue;
+        seen[n] = true;
+        var refs;
+        if (overrides.hasOwnProperty(n)) {
+          objTexts[n] = overrides[n];
+          refs = refsIn(overrides[n].slice(overrides[n].indexOf('obj') + 3));
+        } else if (model.offsets.hasOwnProperty(n)) {
+          objTexts[n] = objText(n);
+          refs = refsOf(n);
+        } else if (model.compressed.hasOwnProperty(n)) {
+          comp[n] = model.compressed[n];
+          refs = refsOf(n).concat([model.compressed[n].stm]);
+        } else continue;
+        for (var r = 0; r < refs.length; r++) if (!seen[refs[r]]) queue.push(refs[r]);
+      }
+      return _pdfWriteObjects_(objTexts, comp, catNum, '', catNum).text;
+    }
+  };
+}
+// ---- PdfAnnotateSearch.js ----
+// ============================================================================
+// PDF: FUNDSTELLEN SUCHEN UND ANNOTATIONEN ZUSAMMENSTELLEN (reine Funktionen)
+// ----------------------------------------------------------------------------
+// Diese Datei enthaelt nur Funktionen ohne Apps-Script-Dienste (kein DriveApp,
+// UrlFetchApp, Utilities ...). Sie laeuft deshalb unveraendert an zwei Stellen:
+//  - in Apps Script (Drive-Add-on, DriveAddon.js) und
+//  - im Browser (Web Worker, gebaut aus PdfInflate, PdfTextPosition,
+//    PdfAnnotate, PdfShrink und dieser Datei, siehe tools/build-pdf-worker.cjs).
+// Wer hier etwas aendert, muss danach "node tools/build-pdf-worker.cjs"
+// ausfuehren (erzeugt PdfWorkerSource.html).
+// ============================================================================
+
+// So viele Seitenmodelle (Glyphen mit Position) bleiben gleichzeitig im Speicher.
+var PDF_ANNOT_MODEL_CACHE_PAGES = 8;
+
+/**
+ * Sucht jeden Fund im Seitentext (PdfTextPosition.gs) und baut daraus die
+ * Annotationen pro Seite. doc/pages: siehe _pdfOpenDoc_ / _pdfCollectPages_.
+ * Liefert { pageAnnotations, count, positioned }.
+ */
+// deadline (ms seit 1970, optional): danach wird ein Fund nur noch auf der
+// von Gemini genannten Seite gesucht statt in allen Seiten - jeder Fund
+// bekommt trotzdem seine Notiz (notfalls oben links auf dieser Seite).
+//
+// opts (optional) macht die Suche fortsetzbar:
+//   stopAt: Zeitpunkt (ms seit 1970), ab dem die Suche unterbricht. Sie liefert
+//           dann { done: false, state } - state ist reines JSON.
+//   resume: state eines früheren Aufrufs; die Suche macht dort weiter.
+// Ohne Unterbrechung enthält das Ergebnis done: true.
+function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
+  opts = opts || {};
+  var st = opts.resume || { next: 0, pageAnnotations: {}, iconsOnPage: {}, occurrenceUsed: {}, positioned: 0, pageWs: {} };
+  var STOP = {};
+  var builtThisRun = 0;
+
+  // Speicher: das volle Seitenmodell (alle Glyphen mit Position) wird nur für
+  // die zuletzt benutzten Seiten gehalten. Für die Suche über alle Seiten
+  // bleibt pro Seite nur der normalisierte Text (pageIndex) - sonst läge bei
+  // langen Dokumenten das ganze Dokument als Glyphen im Speicher.
+  var modelCache = {}, modelOrder = [];
+  var pageIndex = {}; // pageIdx -> { ws, strip } oder null (Seite nicht auswertbar)
+  for (var wk in st.pageWs) {
+    if (st.pageWs.hasOwnProperty(wk)) pageIndex[wk] = st.pageWs[wk] === null ? null : _pdfSearchIndexFromWs_(st.pageWs[wk]);
+  }
+  // Liefert das Modell, null (Seite nicht auswertbar) oder STOP (Zeit um).
+  function getPageModel(pageIdx) {
+    if (modelCache.hasOwnProperty(pageIdx)) return modelCache[pageIdx];
+    if (pageIndex[pageIdx] === null) return null;
+    // Mindestens eine Seite pro Aufruf, damit es immer vorangeht.
+    if (opts.stopAt && builtThisRun > 0 && Date.now() > opts.stopAt) return STOP;
+    builtThisRun++;
+    var model = null;
+    try {
+      var glyphs = _pdfExtractPageGlyphs_(doc, pages[pageIdx]);
+      if (glyphs && glyphs.length) model = _pdfBuildPageModel_(glyphs);
+    } catch (e) {
+      Logger.log('_drivePdfComputeAnnotations_: Seite ' + pageIdx + ' - Content-Stream nicht auswertbar: ' + e.message);
+    }
+    if (!pageIndex.hasOwnProperty(pageIdx)) {
+      pageIndex[pageIdx] = model ? _pdfPageSearchIndex_(model) : null;
+      st.pageWs[pageIdx] = model ? pageIndex[pageIdx].ws : null;
+    }
+    if (!model) return null;
+    modelCache[pageIdx] = model;
+    modelOrder.push(pageIdx);
+    if (modelOrder.length > PDF_ANNOT_MODEL_CACHE_PAGES) delete modelCache[modelOrder.shift()];
+    return model;
+  }
+  // Liefert den Suchindex, null oder STOP.
+  function getPageIndex(pageIdx) {
+    if (!pageIndex.hasOwnProperty(pageIdx) && getPageModel(pageIdx) === STOP) return STOP;
+    return pageIndex[pageIdx];
+  }
+
+  var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
+  var pageAnnotations = st.pageAnnotations;
+  var iconsOnPage = st.iconsOnPage;        // pageIdx -> bereits belegte Icon-Rechtecke
+  var occurrenceUsed = st.occurrenceUsed;  // gleiches Zitat mehrfach gemeldet -> nächstes Vorkommen nehmen
+
+  // Sucht die Stelle eines Fundes: { page, hit, model } oder STOP. Ändert bis
+  // zum Treffer nichts am Zwischenstand, ein Abbruch kostet also nur diesen Fund.
+  function locate(issue, guessedPage) {
+    // Erst die von Gemini genannte Seite versuchen, danach alle anderen -
+    // der tatsächliche Textinhalt ist zuverlässiger als Geminis Seitenangabe.
+    // Durchgang 1 nimmt nur Seiten, auf denen das Zitat wörtlich steht;
+    // Durchgang 2 lässt auch unscharfe Treffer (nur der Zitatanfang) zu.
+    var searchOrder = [guessedPage];
+    if (!deadline || Date.now() < deadline) {
+      for (var p = 0; p < pages.length; p++) { if (p !== guessedPage) searchOrder.push(p); }
+    }
+    var needles = issue.original ? _pdfQuoteNeedles_(issue.original) : [];
+    var kinds = [];
+    for (var pass = 2; pass >= 1 && needles.length; pass--) {
+      for (var si = 0; si < searchOrder.length; si++) {
+        if (pass === 2) {
+          var index = getPageIndex(searchOrder[si]);
+          if (index === STOP) return STOP;
+          kinds[si] = index ? _pdfQuoteMatchKind_(index, needles) : 0;
+        }
+        if (kinds[si] !== pass) continue;
+        var model = getPageModel(searchOrder[si]);
+        if (model === STOP) return STOP;
+        if (!model) continue;
+        var occKey = searchOrder[si] + '|' + String(issue.original).toLowerCase();
+        var h = _pdfFindQuoteOnPage_(model, issue.original, occurrenceUsed[occKey] || 0);
+        if (h) {
+          occurrenceUsed[occKey] = (occurrenceUsed[occKey] || 0) + 1;
+          return { page: searchOrder[si], hit: h, model: model };
+        }
+      }
+    }
+    return { page: null, hit: null, model: null };
+  }
+
+  for (; st.next < capped.length; st.next++) {
+    var issue = capped[st.next];
+    var guessedPage = _pdfGuessPageIndex_(issue.location);
+    if (guessedPage === null || guessedPage < 0 || guessedPage >= pages.length) guessedPage = 0;
+
+    var found = locate(issue, guessedPage);
+    if (found === STOP) return { done: false, state: st, count: capped.length, total: issues.length };
+    var pageIdx = found.page !== null ? found.page : guessedPage;
+
+    var type = _issueTypeKey_(issue);
+    var typeLabel = (type === 'prompt' && issue.rule ? issue.rule : _ct_('type.' + type)).toUpperCase();
+    var contents = '[' + typeLabel + ']\n' + issue.original + '\n\n-> ' + issue.suggestion +
+      (issue.explanation ? '\n\n' + issue.explanation : '') +
+      (issue.location ? '\n\n(AI-reported location: ' + issue.location + ')' : '');
+    var ann = { contents: contents, title: 'Author Check (' + typeLabel + ')' };
+
+    if (found.hit) {
+      st.positioned++;
+      ann.highlight = found.hit.boxes;
+      if (!iconsOnPage[pageIdx]) iconsOnPage[pageIdx] = [];
+      ann.rect = _pdfPlaceNoteIcon_(pages[pageIdx].mediaBox || [0, 0, 612, 792],
+        found.model, found.hit.boxes[0], iconsOnPage[pageIdx]);
+    } // sonst: kein rect -> automatischer Stapel-Fallback oben links
+
+    if (!pageAnnotations[pageIdx]) pageAnnotations[pageIdx] = [];
+    pageAnnotations[pageIdx].push(ann);
+  }
+
+  return { done: true, pageAnnotations: pageAnnotations, count: capped.length, total: issues.length, positioned: st.positioned };
+}
+
+/**
+ * Platziert das Sticky-Note-Icon im Seitenrand auf Höhe der ersten markierten
+ * Zeile (im breiteren Rand neben dem Textblock), damit es keinen Text
+ * verdeckt. Ist die Stelle schon durch ein anderes Icon belegt, wird der
+ * gegenüberliegende Rand genommen, danach schrittweise tiefer.
+ */
+function _pdfPlaceNoteIcon_(mediaBox, model, lineBox, placed) {
+  var size = 20, gap = 4, edge = 2;
+  var yMid = (lineBox[1] + lineBox[3]) / 2;
+  var y = Math.min(mediaBox[3] - size - edge, Math.max(mediaBox[1] + edge, yMid - size / 2));
+  var leftX = Math.max(mediaBox[0] + edge, model.textLeft - size - gap);
+  var rightX = Math.min(mediaBox[2] - size - edge, model.textRight + gap);
+  // Linker Rand bevorzugt; ist er zu schmal (oder schon belegt), der rechte.
+  var columns = (model.textLeft - mediaBox[0] >= mediaBox[2] - model.textRight) ? [leftX, rightX] : [rightX, leftX];
+
+  function overlaps(r) {
+    return placed.some(function(o) { return r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]; });
+  }
+  var rect = null;
+  // Beide Ränder auf Zeilenhöhe probieren, danach schrittweise tiefer.
+  for (var row = 0; row < 20 && !rect; row++) {
+    var ry = Math.max(mediaBox[1] + edge, y - row * (size + 2));
+    for (var c = 0; c < columns.length && !rect; c++) {
+      var cand = [columns[c], ry, columns[c] + size, ry + size];
+      if (!overlaps(cand)) rect = cand;
+    }
+  }
+  if (!rect) rect = [columns[0], y, columns[0] + size, y + size];
+  placed.push(rect);
+  return rect;
+}
+
+/**
+ * Liest Struktur und Seiten einer PDF über reader (ohne Bilder). Fehler dabei
+ * sind mit err.pdfStructure markiert.
+ */
+function _driveAnnotatedAnalyze_(reader) {
+  try {
+    var model = pdfRebuild_(reader, { imageBudget: 0 });
+    var doc = _pdfOpenDoc_(model.text, model.offsets);
+    var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
+    return { model: model, doc: doc, pages: pages };
+  } catch (err) {
+    if (!/^Drive download/.test(err.message || '')) err.pdfStructure = true;
+    throw err;
+  }
+}
+
+function _driveAnnotatedRequirePlain_(an) {
+  // Verschlüsselt: gleich abbrechen statt erst nach der ganzen Suche (pdfAnnotationUpdate_).
+  if (an.model.encrypted) throw new Error('Encrypted PDFs are not supported for annotation.');
+}
+
+/** Baut den Anhang (Incremental Update) für die Original-Datei hinter reader. */
+function _driveAnnotatedAppendix_(reader, an, pageAnnotations) {
+  return pdfAnnotationUpdate_({
+    baseLength: reader.size,
+    endsWithNewline: reader.read(reader.size - 1, reader.size) === '\n',
+    prevXref: an.model.origStartxref,
+    trailerDict: an.model.origTrailer,
+    rootNum: an.model.rootNum,
+    pages: an.pages,
+    maxObjNum: an.model.maxNum,
+    readAnnotsArray: function(num) { return _pdfReadArrayObject_(an.model.text, an.model.offsets, num, an.doc); }
+  }, pageAnnotations);
+}
+
+// Anzeige-Kategorie eines Fundes: terminology, grammar, prompt (Gesamtdokument-
+// Prompt) oder style (alles andere).
+function _issueTypeKey_(issue) {
+  var t = issue && issue.type;
+  return (t === 'terminology' || t === 'grammar' || t === 'prompt') ? t : 'style';
+}
+
+// ---- pdf-worker-main ----
+// ============================================================================
+// WORKER-KLEBER: PDF-Verarbeitung im Browser (Web Worker)
+// ----------------------------------------------------------------------------
+// Diese Datei hängt "tools/build-pdf-worker.cjs" hinter die PDF-Module
+// (PdfInflate, PdfTextPosition, PdfAnnotate, PdfShrink, PdfAnnotateSearch). Sie
+// stellt nur her, was die Module aus Apps Script gewohnt sind:
+//  - einen Leser, der Bytebereiche der PDF in Drive per HTTP-Range holt
+//    (synchron, das geht im Worker; die Module sind synchron geschrieben),
+//  - Logger und _ct_ (Beschriftung der Notizen),
+//  - eine kleine Nachrichten-Schnittstelle zur Seite.
+// Die Datei hat bewusst die Endung .txt: clasp soll sie nicht als Apps-Script-
+// Code hochladen (sie greift auf "self" zu).
+// ============================================================================
+
+var Logger = { log: function() {} };
+var _ctLabels_ = {};
+function _ct_(key) { return Object.prototype.hasOwnProperty.call(_ctLabels_, key) ? _ctLabels_[key] : key; }
+
+var BROWSER_BLOCK = 8 * 1024 * 1024;   // Größe einer Range-Anfrage (wie PDF_SHRINK_CHUNK)
+var BROWSER_CACHE_BLOCKS = 3;          // so viele Blöcke bleiben im Speicher
+var BROWSER_RETRIES = 4;
+
+function _bytesToBinaryString_(u8) {
+  var CH = 8192, parts = [];
+  for (var i = 0; i < u8.length; i += CH) parts.push(String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + CH, u8.length))));
+  return parts.join('');
+}
+
+function _binaryStringToU8_(s) {
+  var out = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 255;
+  return out;
+}
+
+// FNV-1a über die Zeichen (zum Vergleichen großer Texte in Tests).
+function _fnv_(s) {
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i) & 255; h = Math.imul(h, 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+
+function _busyWait_(ms) { var end = Date.now() + ms; while (Date.now() < end) { /* kurze Pause zwischen Wiederholungen */ } }
+
+/**
+ * Leser (read/readMany/size wie _pdfDriveRangeReader_), gespeist per
+ * synchroner XMLHttpRequest. cfg: { url, token, size, block? }.
+ * Gelesen wird in festen Blöcken; ein kleiner Cache sorgt dafür, dass
+ * aufeinanderfolgende kleine Lesungen (die Objekte der PDF) nur eine Anfrage
+ * kosten. Bilder werden dadurch zwar mitgeladen, aber nie behalten - die Datei
+ * wird einmal durchgelesen, nicht komplett im Speicher gehalten.
+ */
+function makeRangeReader_(cfg) {
+  var block = cfg.block || BROWSER_BLOCK;
+  var cache = {}, order = [];
+  var stats = { requests: 0, bytes: 0, retries: 0 };
+
+  // Blöcke bleiben als Bytes (Uint8Array) im Cache und werden erst beim Lesen in
+  // einen Text umgewandelt. Ein Teilstring (slice) eines großen Textes hielte den
+  // ganzen Block im Speicher - bei einer Datei mit vielen Bildern also die ganze
+  // Datei.
+  function fetchBlock(idx) {
+    var start = idx * block, end = Math.min(cfg.size, start + block) - 1;
+    for (var attempt = 0; ; attempt++) {
+      var xhr = new XMLHttpRequest();
+      try {
+        xhr.open('GET', cfg.url, false);
+        xhr.responseType = 'arraybuffer';
+        if (cfg.token) xhr.setRequestHeader('Authorization', 'Bearer ' + cfg.token);
+        xhr.setRequestHeader('Range', 'bytes=' + start + '-' + end);
+        xhr.send(null);
+        stats.requests++;
+        if (xhr.status === 401) { var e401 = new Error('Drive session expired (HTTP 401). Please start again.'); e401.fatal = true; throw e401; }
+        if (xhr.status === 206 || xhr.status === 200) {
+          var u8 = new Uint8Array(xhr.response);
+          // Range ignoriert (HTTP 200 mit der ganzen Datei): passenden Teil nehmen.
+          if (xhr.status === 200 && u8.length > end - start + 1) u8 = u8.slice(start, end + 1);
+          stats.bytes += u8.length;
+          return u8;
+        }
+        if (xhr.status === 403 || xhr.status === 404) { var eF = new Error('Drive download failed (HTTP ' + xhr.status + ').'); eF.fatal = true; throw eF; }
+        throw new Error('Drive download failed (HTTP ' + xhr.status + ').');
+      } catch (err) {
+        if (err.fatal || attempt >= BROWSER_RETRIES) throw err;
+        stats.retries++;
+        _busyWait_(400 * Math.pow(2, attempt));
+      }
+    }
+  }
+
+  function getBlock(idx) {
+    if (Object.prototype.hasOwnProperty.call(cache, idx)) {
+      order.splice(order.indexOf(idx), 1); order.push(idx);
+      return cache[idx];
+    }
+    var u8 = fetchBlock(idx);
+    cache[idx] = u8; order.push(idx);
+    while (order.length > BROWSER_CACHE_BLOCKS) delete cache[order.shift()];
+    return u8;
+  }
+
+  function read(start, end) {
+    end = Math.min(end, cfg.size);
+    if (start >= end) return '';
+    var first = Math.floor(start / block), last = Math.floor((end - 1) / block);
+    if (first === last) {
+      return _bytesToBinaryString_(getBlock(first).subarray(start - first * block, end - first * block));
+    }
+    var out = [];
+    for (var i = first; i <= last; i++) {
+      var from = Math.max(start, i * block) - i * block, to = Math.min(end, (i + 1) * block) - i * block;
+      out.push(_bytesToBinaryString_(getBlock(i).subarray(from, to)));
+    }
+    return out.join('');
+  }
+
+  return {
+    size: cfg.size,
+    stats: stats,
+    read: read,
+    readMany: function(ranges) { return ranges.map(function(r) { return read(r[0], r[1]); }); }
+  };
+}
+
+// ─── Zustand und Befehle ──────────────────────────────────────────────────
+var S = { reader: null, an: null, cfg: null };
+
+function post_(msg, transfer) { self.postMessage(msg, transfer || []); }
+
+function cmdOpen_(m) {
+  var t0 = Date.now();
+  S.cfg = { url: m.url, token: m.token, size: m.size, block: m.block };
+  S.reader = makeRangeReader_(S.cfg);
+  S.an = _driveAnnotatedAnalyze_(S.reader);
+  var text = S.an.model.text;
+  return {
+    pages: S.an.pages.length, encrypted: !!S.an.model.encrypted,
+    imagesRemoved: S.an.model.imagesRemoved, imagesKept: S.an.model.imagesKept,
+    shrunkBytes: text.length, shrunkHash: _fnv_(text),
+    requests: S.reader.stats.requests, downloadedBytes: S.reader.stats.bytes, retries: S.reader.stats.retries,
+    ms: Date.now() - t0
+  };
+}
+
+function cmdAnnotate_(m) {
+  if (!S.an) throw new Error('No PDF opened.');
+  var t0 = Date.now();
+  _ctLabels_ = m.labels || {};
+  _driveAnnotatedRequirePlain_(S.an);
+  var state = null, res = null, slices = 0;
+  do {
+    res = _drivePdfComputeAnnotations_(S.an.doc, S.an.pages, m.issues, null,
+      { resume: state, stopAt: Date.now() + 300 });
+    slices++;
+    if (!res.done) {
+      state = res.state;
+      post_({ id: m.id, progress: { phase: 'search', next: state.next, count: res.count } });
+    }
+  } while (!res.done);
+  var appendix = _driveAnnotatedAppendix_(S.reader, S.an, res.pageAnnotations);
+  var u8 = _binaryStringToU8_(appendix);
+  return {
+    result: { count: res.count, total: res.total, positioned: res.positioned, slices: slices,
+              appendixBytes: u8.length, ms: Date.now() - t0,
+              requests: S.reader.stats.requests, downloadedBytes: S.reader.stats.bytes },
+    transfer: [u8.buffer], appendix: u8
+  };
+}
+
+// Bereitet die Prüfpakete vor (wie _drivePdfPrepUnit_ in Apps Script): Bilder bis
+// zum Budget behalten, Seiten in Pakete teilen. Pakete bleiben im Worker; über
+// "part" wird eines abgeholt.
+function cmdSplit_(m) {
+  var t0 = Date.now();
+  var reader = S.reader || makeRangeReader_(m);
+  var model = pdfRebuild_(reader, { imageBudget: m.imageBudget === undefined ? 12 * 1024 * 1024 : m.imageBudget });
+  var splitter = pdfPageSplitter_({ text: model.text, offsets: model.offsets, compressed: model.compressed,
+                                    rootNum: model.rootNum, maxNum: model.maxNum, encrypted: model.encrypted });
+  var n = splitter.pageCount, per = m.pagesPerPart || 4, sizes = [];
+  S.parts = [];
+  for (var from = 0; from < n; from += per) {
+    var piece = splitter.build(from, Math.min(n, from + per));
+    S.parts.push(piece);
+    sizes.push(piece.length);
+  }
+  return { result: { pages: n, parts: S.parts.length, sizes: sizes, shrunkBytes: model.text.length,
+                     imagesKept: model.imagesKept, imagesRemoved: model.imagesRemoved,
+                     requests: reader.stats.requests, downloadedBytes: reader.stats.bytes, ms: Date.now() - t0 } };
+}
+
+function cmdPart_(m) {
+  var u8 = _binaryStringToU8_(S.parts[m.index]);
+  return { result: { bytes: u8.length }, transfer: [u8.buffer], part: u8 };
+}
+
+self.onmessage = function(ev) {
+  var m = ev.data, out;
+  try {
+    if (m.cmd === 'open') out = { result: cmdOpen_(m) };
+    else if (m.cmd === 'annotate') out = cmdAnnotate_(m);
+    else if (m.cmd === 'split') out = cmdSplit_(m);
+    else if (m.cmd === 'part') out = cmdPart_(m);
+    else throw new Error('Unknown command: ' + m.cmd);
+  } catch (err) {
+    post_({ id: m.id, error: { message: String(err && err.message || err), fatal: !!(err && err.fatal), structure: !!(err && err.pdfStructure) } });
+    return;
+  }
+  var reply = { id: m.id, result: out.result };
+  if (out.appendix) reply.appendix = out.appendix;
+  if (out.part) reply.part = out.part;
+  post_(reply, out.transfer);
+};
+
+</script>
