@@ -65,8 +65,9 @@ function apiPdfBrowserInit(fileInput) {
 
 /**
  * Vorbereitung: Datei prüfen, Token geben, Sprache und Regeln laden.
- * Liefert zusätzlich docPromptTitles: Gesamtdokument-Prompts, die im Browser-Weg
- * noch nicht laufen (der Browser zeigt dazu einen Hinweis).
+ * Liefert zusätzlich docPromptTitles (die aktiven Gesamtdokument-Prompts, z. B. Gems)
+ * und docMaxBytes (so groß darf die PDF für diese Prompts höchstens sein, sonst läuft
+ * der Seitentext).
  */
 function apiPdfBrowserPrepare(fileInput, language) {
   var lang = DRIVE_PDF_LANGUAGES.some(function(pair) { return pair[0] === language; }) ? language : 'de';
@@ -78,8 +79,8 @@ function apiPdfBrowserPrepare(fileInput, language) {
   info.language = lang;
   info.languageName = _drivePdfLanguageName_(lang);
   info.docPromptTitles = docPrompts.map(function(dp) { return dp.title; });
-  try { info.docNotes = _docPromptNotes_(lang, rules); } catch (noteErr) { info.docNotes = []; }
   info.maxBytes = DRIVE_PDF_MAX_BYTES;
+  info.docMaxBytes = _docPromptPdfMaxBytes_();
   return info;
 }
 
@@ -117,6 +118,63 @@ function apiPdfBrowserCheckPart(b64, meta) {
   }
   if (res.failedRanges.length) return { failed: true, error: 'AI request failed' };
   return { issues: res.issues };
+}
+
+/**
+ * Gesamtdokument-Prompts (z. B. Gems): je Prompt eine Anfrage über das ganze Dokument
+ * (wie _drivePdfDocStep_ im Add-on). req: { language, fileName, pages, sizeBytes,
+ * mode: 'pdf' | 'text', b64 (PDF) | texts (Text je Seite), indexes (Auswahl, Standard alle) }.
+ * Liefert { indexes, reports }: je Prompt { title, markdown, issues, truncated, note }
+ * oder { title, error, code }. Fehlgeschlagene Prompts wiederholt der Browser im Textmodus.
+ */
+function apiPdfBrowserDocPrompts(req) {
+  req = req || {};
+  var lang = DRIVE_PDF_LANGUAGES.some(function(pair) { return pair[0] === req.language; }) ? req.language : 'de';
+  var cfg = _driveGeminiConfig_();
+  var rules = _rulesLanguageSupported_(lang) ? apiGetRulesConfig(lang) : [];
+  var all = _docPromptsFromRules_(rules.filter(function(r) { return r.IsEnabled; }));
+  var indexes = (Array.isArray(req.indexes) ? req.indexes : all.map(function(p, i) { return i; }))
+    .map(function(i) { return parseInt(i, 10); })
+    .filter(function(i, k, arr) { return i >= 0 && i < all.length && arr.indexOf(i) === k; });
+  if (!indexes.length) return { indexes: [], reports: [] };
+  var selected = indexes.map(function(i) { return all[i]; });
+  var fileName = String(req.fileName || 'PDF').slice(0, 200);
+  var pages = Math.max(0, Math.min(100000, parseInt(req.pages, 10) || 0));
+  var sizeBytes = Math.max(0, parseInt(req.sizeBytes, 10) || 0);
+
+  var reports;
+  if (req.mode === 'pdf') {
+    if (!req.b64 || typeof req.b64 !== 'string') throw new Error('No PDF data.');
+    reports = _runDocPrompts_(cfg, selected, { fileName: fileName, pages: pages, isPdf: true }, Utilities.base64Decode(req.b64));
+  } else {
+    var texts = (Array.isArray(req.texts) ? req.texts : []).map(function(t) { return String(t === undefined || t === null ? '' : t); });
+    var total = texts.length || pages;
+    var chars = texts.join('').replace(/\s+/g, '').length;
+    if (chars < 200) {
+      var msg = _ct_('d.docNoText', { mb: _driveMb_(sizeBytes) });
+      reports = selected.map(function(dp) { return { title: dp.title, error: msg }; });
+    } else {
+      var text = texts.map(function(t, i) { return '=== Page ' + (i + 1) + ' of ' + total + ' ===\n' + t; }).join('\n\n');
+      var note = _ct_('d.docTextMode', { mb: _driveMb_(sizeBytes), pages: total });
+      logAuditEvent_(getUserEmail_(), 'DOC_PROMPT_TEXT_MODE', fileName + ' - ' + _driveMb_(sizeBytes) + ' MB, ' + total + ' pages, ' + text.length + ' chars, browser');
+      reports = _runDocPrompts_(cfg, selected, { fileName: fileName, pages: total, isPdf: false, fromPdf: true, text: text }, null)
+        .map(function(r) { if (!r.error) r.note = note; return r; });
+    }
+  }
+  return { indexes: indexes, reports: reports };
+}
+
+/**
+ * Bericht der Gesamtdokument-Prompts als Google Doc (wie im Add-on). reports: die
+ * Berichte aus apiPdfBrowserDocPrompts. Liefert { url, items, error }.
+ */
+function apiPdfBrowserDocReport(fileName, reports) {
+  var cut = function(v, n) { return String(v === undefined || v === null ? '' : v).slice(0, n); };
+  var clean = (Array.isArray(reports) ? reports : []).slice(0, 20).map(function(r) {
+    return { title: cut(r && r.title, 200), markdown: cut(r && r.markdown, 400000), error: cut(r && r.error, 500),
+             note: cut(r && r.note, 400), truncated: !!(r && r.truncated), issues: [] };
+  });
+  return _finishDocPromptReports_(cut(fileName, 200) || 'PDF', clean, 'pdfs', []);
 }
 
 // Beim Weiterreichen an Apps-Script-Funktionen nur bekannte Felder und begrenzte Längen.

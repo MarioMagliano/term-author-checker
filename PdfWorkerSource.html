@@ -2965,6 +2965,24 @@ function cmdPiece_(m) {
   return { result: { bytes: str.length, b64: btoa(str) } };
 }
 
+// Die ganze neu aufgebaute PDF (Bilder bis zum Budget behalten) als Base64, fuer die
+// Gesamtdokument-Prompts im PDF-Modus. Ob sie klein genug ist, entscheidet die Seite
+// (opened.shrunkBytes gegen die Grenze des Servers).
+function cmdWhole_(m) {
+  if (!S.an) throw new Error('No PDF opened.');
+  var str = S.an.model.text;
+  return { result: { bytes: str.length, b64: btoa(str) } };
+}
+
+// Text aller Seiten (wie _drivePdfDocTextRun_ in DriveAddon.js) fuer den Textmodus.
+function cmdPageTexts_(m) {
+  if (!S.an) throw new Error('No PDF opened.');
+  var texts;
+  try { texts = _pdfExtractPageTexts_(S.an.model.text); }
+  catch (e) { Logger.log('cmdPageTexts_: ' + (e.message || e)); texts = []; }
+  return { result: { texts: texts } };
+}
+
 self.onmessage = async function(ev) {
   var m = ev.data, out;
   try {
@@ -2972,6 +2990,8 @@ self.onmessage = async function(ev) {
     else if (m.cmd === 'annotate') out = cmdAnnotate_(m);
     else if (m.cmd === 'plan') out = cmdPlan_(m);
     else if (m.cmd === 'piece') out = cmdPiece_(m);
+    else if (m.cmd === 'whole') out = cmdWhole_(m);
+    else if (m.cmd === 'pageTexts') out = cmdPageTexts_(m);
     else throw new Error('Unknown command: ' + m.cmd);
   } catch (err) {
     post_({ id: m.id, error: { message: String(err && err.message || err), fatal: !!(err && err.fatal), structure: !!(err && err.pdfStructure) } });

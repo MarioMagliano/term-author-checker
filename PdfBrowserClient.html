@@ -78,6 +78,10 @@ var PdfBrowser = (function() {
       piece: function(from, to) {
         return call({ cmd: 'piece', from: from, to: to }).then(function(m) { return m.result; });
       },
+      /** Die ganze neu aufgebaute PDF als Base64: { bytes, b64 } (fuer Gesamtdokument-Prompts im PDF-Modus). */
+      whole: function() { return call({ cmd: 'whole' }).then(function(m) { return m.result; }); },
+      /** Text aller Seiten: { texts: [Seite 1, Seite 2, ...] } (Textmodus der Gesamtdokument-Prompts). */
+      pageTexts: function() { return call({ cmd: 'pageTexts' }).then(function(m) { return m.result; }); },
       /**
        * Setzt die kommentierte PDF zusammen: Original unverändert (stückweise
        * von Drive) + Anhang. Ein Blob größerer Dateien hält der Browser auf der

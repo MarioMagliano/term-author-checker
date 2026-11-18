@@ -71,7 +71,9 @@ async function main() {
     const ranges = [], pieces = [];
     for (let f = 0; f < n; f += per) { ranges.push([f, Math.min(n, f + per)]); pieces.push(sp.build(f, Math.min(n, f + per))); }
     return { n: n, per: per, ranges: ranges, sizes: pieces.map(function(x) { return x.length; }),
-             first: pieces[0], last: pieces[pieces.length - 1], imagesKept: model.imagesKept };
+             first: pieces[0], last: pieces[pieces.length - 1], imagesKept: model.imagesKept,
+             // for the whole-document prompts: the whole rebuilt PDF and the text of all pages (as the add-on reads them)
+             wholeLen: model.text.length, wholeHash: fnv(model.text), texts: ctx._pdfExtractPageTexts_(model.text) };
   })();
 
   // ── Server that behaves like Drive ───────────────────────────────────────
@@ -177,8 +179,14 @@ async function main() {
         if (i === plan.ranges.length - 1) last = piece.b64;
       }
       const single = await c2.piece(0, 1);
+      const whole = await c2.whole();
+      const bin = atob(whole.b64);
+      let h = 0x811c9dc5;
+      for (let i = 0; i < bin.length; i++) { h ^= bin.charCodeAt(i) & 255; h = Math.imul(h, 0x01000193) >>> 0; }
+      const pt = await c2.pageTexts();
       c2.close();
-      return { open: { imagesKept: open.imagesKept }, plan: plan, sizes: sizes, first: first, last: last, singleBytes: single.bytes, ms: Math.round(performance.now() - t0) };
+      return { open: { imagesKept: open.imagesKept, shrunkBytes: open.shrunkBytes }, plan: plan, sizes: sizes, first: first, last: last, singleBytes: single.bytes,
+               wholeBytes: whole.bytes, wholeHash: h >>> 0, texts: pt.texts, ms: Math.round(performance.now() - t0) };
     }, Object.assign({ budget: BUDGET }, P));
     out.split = splitInfo;
     await page.evaluate(function() { window.__pdf.close(); });
@@ -213,6 +221,10 @@ async function main() {
       JSON.stringify(out.split.sizes) === JSON.stringify(refParts.sizes), out.split.plan.ranges.length + ' parts, ' + out.split.open.imagesKept + ' images kept');
     check('check preparation: first and last part identical to reference',
       Buffer.from(out.split.first, 'base64').toString('latin1') === refParts.first && Buffer.from(out.split.last, 'base64').toString('latin1') === refParts.last);
+    check('whole-document prompts: the whole rebuilt PDF is identical to the add-on\'s',
+      out.split.wholeBytes === refParts.wholeLen && out.split.wholeHash === refParts.wholeHash && out.split.open.shrunkBytes === refParts.wholeLen, mb(refParts.wholeLen) + ' MB');
+    check('whole-document prompts: the page text is identical to the add-on\'s (' + refParts.texts.length + ' pages)',
+      JSON.stringify(out.split.texts) === JSON.stringify(refParts.texts) && out.split.texts.length === pageCount && out.split.texts[0].indexOf('mark1x0') !== -1);
     check('a single page can be built as its own PDF', out.split.singleBytes > 0 && out.split.singleBytes < refParts.sizes[0]);
 
     // The output must open in a real PDF reader and carry the notes.
@@ -255,13 +267,18 @@ async function main() {
     // Simulated Apps Script + Gemini. Gemini "finds" one issue per checked part: a real line
     // of the first page of the part. The second part always fails when it has several pages,
     // so the page has to check it page by page.
-    const srvLog = { prepare: 0, parts: [], failedParts: 0, logged: null, sheetIssues: 0, languages: [] };
-    const quoteOf = function(pageIdx) { return built.lines[pageIdx][3].split(' ').slice(2, 8).join(' '); };
+    const srvLog = { prepare: 0, parts: [], failedParts: 0, logged: null, sheetIssues: 0, languages: [], doc: [], docReport: null };
+    const quoteOf = function(pageIdx, line) { return built.lines[pageIdx][line === undefined ? 3 : line].split(' ').slice(2, 8).join(' '); };
+    // Whole-document prompts ("Gems"): A works, B is rejected with the PDF but works with the page text, C always fails.
+    const GEMS = ['Gem A', 'Gem B', 'Gem C'];
+    const gemIssue = function(title, page, line, n) {
+      return { type: 'prompt', rule: title, location: 'Page ' + (page + 1), original: quoteOf(page, line), suggestion: 'gem fix ' + n, explanation: 'simulated', replaceable: false };
+    };
     await ui.exposeFunction('__srv', function(name, args) {
       if (name === 'apiPdfBrowserPrepare') {
         srvLog.prepare++; srvLog.languages.push(args[1]);
         return { fileId: FILE_ID, name: 'Handbuch <b>1</b>.pdf', size: pdf.length, token: TOKEN, labels: { 'type.grammar': 'Grammar' },
-                 language: args[1], languageName: 'German', docPromptTitles: ['Doc rule A'], docNotes: ['Note about rules'], maxBytes: 15 * 1024 * 1024 };
+                 language: args[1], languageName: 'German', docPromptTitles: GEMS, docMaxBytes: 50 * 1024 * 1024, maxBytes: 15 * 1024 * 1024 };
       }
       if (name === 'apiPdfBrowserCheckPart') {
         const b64 = args[0], meta = args[1];
@@ -270,6 +287,19 @@ async function main() {
         if (meta.from === refParts.per && meta.to - meta.from > 1) { srvLog.failedParts++; return { failed: true, error: 'simulated' }; }
         return { issues: [{ type: (meta.from % 2) ? 'spelling' : 'grammar', location: 'Page ' + (meta.from + 1), original: quoteOf(meta.from), suggestion: 'fixed ' + meta.from, explanation: 'simulated' }] };
       }
+      if (name === 'apiPdfBrowserDocPrompts') {
+        const req = args[0];
+        srvLog.doc.push({ mode: req.mode, indexes: req.indexes, pdf: !!req.b64 && Buffer.from(req.b64.slice(0, 16), 'base64').toString('latin1').slice(0, 5) === '%PDF-',
+                          texts: req.texts ? req.texts.length : 0, firstPageHasMarker: !!(req.texts && req.texts[0].indexOf('mark1x0') !== -1), pages: req.pages, sizeBytes: req.sizeBytes });
+        const reports = req.indexes.map(function(i) {
+          if (i === 2) return { title: GEMS[2], error: 'AI request failed (503).', code: 503 };
+          if (i === 1 && req.mode === 'pdf') return { title: GEMS[1], error: 'AI request failed (400).', code: 400 };
+          const issues = i === 0 ? [gemIssue(GEMS[0], 1, 5, 1), gemIssue(GEMS[0], 3, 5, 2)] : [gemIssue(GEMS[1], 2, 6, 3)];
+          return { title: GEMS[i], markdown: '# Report ' + i, issues: issues, note: req.mode === 'text' ? 'text mode' : '' };
+        });
+        return { indexes: req.indexes, reports: reports };
+      }
+      if (name === 'apiPdfBrowserDocReport') { srvLog.docReport = { file: args[0], titles: args[1].map(function(r) { return r.title; }), noIssues: args[1].every(function(r) { return !('issues' in r); }) }; return { url: 'https://doc.test/report', items: [] }; }
       if (name === 'apiPdfBrowserLogRun') { srvLog.logged = args; return true; }
       if (name === 'apiPdfBrowserExportSheet') { srvLog.sheetIssues = args[0].length; return 'https://sheet.test/report'; }
       throw new Error('unexpected call ' + name);
@@ -295,17 +325,29 @@ async function main() {
     const chips = await ui.$eval('#chips', function(n) { return n.textContent; });
     const issueRows = await ui.$$eval('#issues tr', function(r) { return r.length - 1; });
     const nParts = refParts.ranges.length;
-    const expectedIssues = (nParts - 1) + refParts.per;   // every part, except the failing one that is checked page by page
+    const pageIssues = (nParts - 1) + refParts.per;   // every part, except the failing one that is checked page by page
+    const expectedIssues = pageIssues + 3;             // plus the findings of Gem A (2) and Gem B (1)
     check('page: all steps ok, no errors', rows.length >= 6 && rows.every(function(t) { return t.indexOf('✖') === -1; }) && uiErrors.length === 0, uiErrors.join(' | '));
     check('page: file name is shown as text, not as HTML', rows.join(' ').indexOf('<b>1</b>') !== -1 && (await ui.$$('#steps b')).length === 0);
-    check('page: hint about whole-document prompts shown', notes.indexOf('Doc rule A') !== -1 && notes.indexOf('Note about rules') !== -1);
+    check('page: whole-document prompts first go with the PDF, the rejected one is repeated with the page text',
+      srvLog.doc.length === 2 && srvLog.doc[0].mode === 'pdf' && JSON.stringify(srvLog.doc[0].indexes) === '[0,1,2]' && srvLog.doc[0].pdf &&
+      srvLog.doc[1].mode === 'text' && JSON.stringify(srvLog.doc[1].indexes) === '[1,2]', JSON.stringify(srvLog.doc.map(function(d) { return d.mode + ':' + d.indexes; })));
+    check('page: page text of the whole document reaches the server', srvLog.doc[1].texts === pageCount && srvLog.doc[1].firstPageHasMarker && srvLog.doc[1].pages === pageCount && srvLog.doc[1].sizeBytes > 0);
+    check('page: the report of the prompts is created and linked', srvLog.docReport && JSON.stringify(srvLog.docReport.titles) === JSON.stringify([GEMS[0], GEMS[1]]) &&
+      srvLog.docReport.noIssues && (await ui.$eval('#docReportLink', function(a) { return a.href; })) === 'https://doc.test/report', JSON.stringify(srvLog.docReport));
+    check('page: only real problems are shown as messages (no hints about disabled or unsupported prompts)',
+      notes.indexOf('Gem C') !== -1 && notes.indexOf('fehlgeschlagen') !== -1 && notes.indexOf('Gem A') === -1 && notes.indexOf('Gem B') === -1 &&
+      notes.indexOf('laufen im Browser-Weg') === -1 && notes.indexOf('ausgeschaltet') === -1, notes);
     check('page: every part sent to the check as its own PDF', srvLog.parts.length > 0 && srvLog.parts.every(function(x) { return x.pdf; }) &&
       srvLog.parts.filter(function(x) { return x.to - x.from === refParts.per || x.to === refParts.n; }).length >= nParts, srvLog.parts.length + ' calls for ' + nParts + ' parts');
     check('page: parts of several pages are marked as split', srvLog.parts.every(function(x) { return x.split === true; }));
     check('page: failing part was retried and then checked page by page', srvLog.failedParts === 3 &&
       srvLog.parts.filter(function(x) { return x.to - x.from === 1 && x.from >= refParts.per && x.from < 2 * refParts.per; }).length === refParts.per, srvLog.failedParts + ' failed calls');
-    check('page: issues of all parts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' Funde') !== -1, issueRows + ' of ' + expectedIssues);
+    check('page: issues of all parts and of the prompts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' Funde') !== -1, issueRows + ' of ' + expectedIssues);
+    check('page: every prompt with findings is its own category, like Terminologie or Grammatik',
+      chips.indexOf('Gem A') !== -1 && chips.indexOf('Gem B') !== -1 && chips.indexOf('Gem C') === -1 && (await ui.$$('#chips [data-cat^="p:"]')).length === 2);
     check('page: chips count the real types (spelling is not hidden under style)', chips.indexOf('Rechtschreibung') !== -1 && chips.indexOf('Grammatik') !== -1 && chips.indexOf('Stil') === -1, chips);
+    check('page: buttons show how many findings they use', (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Kommentierte PDF erzeugen (' + expectedIssues + ')');
     check('page: run is logged', srvLog.logged && srvLog.logged[0] === 'Handbuch <b>1</b>.pdf' && srvLog.logged[1] === expectedIssues && srvLog.logged[2] === nParts);
 
     await ui.click('#sheetBtn');
@@ -329,6 +371,39 @@ async function main() {
     } catch (e) { uiPy = String(e.message).split('\n')[0]; }
     // Every issue quotes a real line, so each gets a note and a highlight.
     check('page: every issue is a note and a highlight in the downloaded PDF', uiPy === pageCount + ' ' + (2 * expectedIssues), uiPy);
+
+    // Filter: a category can be switched off; list, buttons and both exports follow.
+    const catCount = async function(c) { return ui.$eval('#chips [data-cat="' + c + '"] b', function(b) { return parseInt(b.textContent, 10); }); };
+    const spelling = await catCount('spelling');
+    await ui.click('#chips [data-cat="p:Gem A"]');
+    check('page: switching a category off hides its findings and shows it as off',
+      (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === expectedIssues - 2 &&
+      (await ui.$eval('#chips [data-cat="p:Gem A"]', function(c) { return c.classList.contains('off') && c.getAttribute('aria-pressed') === 'false'; })) &&
+      (await ui.$eval('#chips', function(n) { return n.textContent; })).indexOf((expectedIssues - 2) + ' von ' + expectedIssues + ' Funde') !== -1);
+    await ui.click('#chips [data-cat="spelling"]');
+    const filteredCount = expectedIssues - 2 - spelling;
+    check('page: several categories can be off at once; the buttons show the new count',
+      (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === filteredCount &&
+      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Als Sheet exportieren (' + filteredCount + ')' &&
+      (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Kommentierte PDF erzeugen (' + filteredCount + ')', 'expected ' + filteredCount);
+    await ui.click('#sheetBtn');
+    await ui.waitForFunction(function() { return document.getElementById('sheetLink'); }, null, { timeout: 30000 });
+    check('page: the sheet export only gets the findings that are switched on', srvLog.sheetIssues === filteredCount, srvLog.sheetIssues + ' of ' + filteredCount);
+    await ui.click('#annBtn');
+    await ui.waitForSelector('#dlLink', { timeout: 180000 });
+    const dl2Promise = ui.waitForEvent('download', { timeout: 120000 });
+    await ui.click('#dlLink');
+    const dl2 = await dl2Promise;
+    const dl2Path = path.join(require('os').tmpdir(), 'browser-page-download-filtered.pdf');
+    await dl2.saveAs(dl2Path);
+    let uiPy2 = '';
+    try { uiPy2 = execFileSync('python3', ['-c', "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nprint(len(r.pages), sum(len(p.get('/Annots') or []) for p in r.pages))", dl2Path], { encoding: 'utf8' }).trim(); }
+    catch (e) { uiPy2 = String(e.message).split('\n')[0]; }
+    check('page: the commented PDF only contains the findings that are switched on', uiPy2 === pageCount + ' ' + (2 * filteredCount), uiPy2);
+    await ui.click('#chipAll');
+    check('page: "alle anzeigen" switches everything on again',
+      (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === expectedIssues && (await ui.$$('#chipAll')).length === 0 &&
+      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Als Sheet exportieren (' + expectedIssues + ')');
 
     // Diagnostic probe on the same opened file.
     await ui.click('#diagBox summary');

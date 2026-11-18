@@ -124,8 +124,9 @@ Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prom
   `PdfAnnotate`, `PdfShrink`, `PdfAnnotateSearch`) plus `tools/pdf-worker-main.txt`. Nach jeder Änderung an einem
   Modul `node tools/build-pdf-worker.cjs` ausführen und `PdfWorkerSource.html` mit einchecken.
 - **Regeln als eigene Seite:** `<Web-App-URL>?page=rules` zeigt dasselbe Popup „Rules & Custom Prompts“ wie in Docs, Sheets und Slides, aber in einem Browser-Fenster (Aufruf aus dem Translation-Services-Portal, Reiter [FTS-C]). Die Regeln liegen pro Nutzer, sind also dieselben wie im Add-on.
-- **Noch nicht im Browser-Weg:** Gesamtdokument-Prompts (`DocPrompts.js`). Die Seite zeigt einen Hinweis mit den
-  Namen, wenn für die gewählte Sprache welche aktiv sind.
+- **Gesamtdokument-Prompts (z. B. Gems):** laufen parallel zu den Seitenpaketen, je Prompt eine Anfrage über das ganze Dokument (`apiPdfBrowserDocPrompts`). Passt die neu aufgebaute PDF in die Grenze `DOC_PROMPT_PDF_MAX_MB` (Standard 13 MB), geht sie als PDF mit, sonst oder bei einer abgelehnten Anfrage läuft der Prompt mit dem Text aller Seiten (wie im Add-on). Die Funde erscheinen mit dem Namen des Prompts als eigene Kategorie, der Bericht als Google Doc (`apiPdfBrowserDocReport`) ist verlinkt.
+- **Filter:** Die Kategorien im Ergebnis (Terminologie, Grammatik, Rechtschreibung, Stil und je ein Chip pro Gesamtdokument-Prompt) sind Schalter. Liste, kommentierte PDF und Sheet nutzen nur die eingeschalteten; die Zahl steht in den Knöpfen.
+- **Meldungen:** Hinweise zu ausgeschalteten Prompts erscheinen nicht. Gezeigt werden nur echte Probleme (ein Prompt ist fehlgeschlagen, Seiten ohne Ergebnis).
 - **Prompt-Cache:** Der Prompt wird 5 Minuten je Sprache zwischengespeichert (`CacheService`); Regeländerungen
   greifen danach.
 
