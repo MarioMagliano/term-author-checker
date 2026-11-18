@@ -232,6 +232,7 @@ async function main() {
       .replace('<?= fileId ?>', '')
       .replace('<?!= JSON.stringify(languages) ?>', function() { return JSON.stringify([['de', 'German'], ['en', 'English']]); })
       .replace('<?!= JSON.stringify(lastLang) ?>', function() { return JSON.stringify('de'); })
+      .replace('<?!= JSON.stringify(parallel) ?>', function() { return '6'; })
       .replace("<?!= include('PdfWorkerSource'); ?>", function() { return builder.build(); })
       .replace("<?!= include('PdfBrowserClient'); ?>", function() { return client; });
     const ctx2 = await browser.newContext({ acceptDownloads: true });
@@ -267,7 +268,7 @@ async function main() {
         const head = Buffer.from(b64.slice(0, 16), 'base64').toString('latin1').slice(0, 5);
         srvLog.parts.push({ from: meta.from, to: meta.to, split: meta.split, pdf: head === '%PDF-', imagesRemoved: meta.imagesRemoved });
         if (meta.from === refParts.per && meta.to - meta.from > 1) { srvLog.failedParts++; return { failed: true, error: 'simulated' }; }
-        return { issues: [{ type: 'grammar', location: 'Page ' + (meta.from + 1), original: quoteOf(meta.from), suggestion: 'fixed ' + meta.from, explanation: 'simulated' }] };
+        return { issues: [{ type: (meta.from % 2) ? 'spelling' : 'grammar', location: 'Page ' + (meta.from + 1), original: quoteOf(meta.from), suggestion: 'fixed ' + meta.from, explanation: 'simulated' }] };
       }
       if (name === 'apiPdfBrowserLogRun') { srvLog.logged = args; return true; }
       if (name === 'apiPdfBrowserExportSheet') { srvLog.sheetIssues = args[0].length; return 'https://sheet.test/report'; }
@@ -304,6 +305,7 @@ async function main() {
     check('page: failing part was retried and then checked page by page', srvLog.failedParts === 3 &&
       srvLog.parts.filter(function(x) { return x.to - x.from === 1 && x.from >= refParts.per && x.from < 2 * refParts.per; }).length === refParts.per, srvLog.failedParts + ' failed calls');
     check('page: issues of all parts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' Funde') !== -1, issueRows + ' of ' + expectedIssues);
+    check('page: chips count the real types (spelling is not hidden under style)', chips.indexOf('Rechtschreibung') !== -1 && chips.indexOf('Grammatik') !== -1 && chips.indexOf('Stil') === -1, chips);
     check('page: run is logged', srvLog.logged && srvLog.logged[0] === 'Handbuch <b>1</b>.pdf' && srvLog.logged[1] === expectedIssues && srvLog.logged[2] === nParts);
 
     await ui.click('#sheetBtn');

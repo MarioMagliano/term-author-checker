@@ -19,6 +19,8 @@ function _renderPdfBrowserPage_(e) {
   var tpl = HtmlService.createTemplateFromFile('PdfBrowser');
   tpl.fileId = String(p.fileId || '');
   tpl.languages = DRIVE_PDF_LANGUAGES;
+  // Wie viele Pakete gleichzeitig an Gemini gehen (mehr = schneller, aber eher Limits des Proxys).
+  tpl.parallel = Math.max(1, Math.min(12, parseInt(p.parallel, 10) || 6));
   var wanted = String(p.lang || '');
   var last = '';
   try { last = PropertiesService.getUserProperties().getProperty(DRIVE_PDF_LAST_LANG_KEY) || ''; } catch (propErr) {}

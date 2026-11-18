@@ -86,7 +86,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 (function() {
   var LANGS = <?!= JSON.stringify(languages) ?>;
   var LAST_LANG = <?!= JSON.stringify(lastLang) ?>;
-  var PARALLEL = 6;           // Pakete gleichzeitig bei Gemini
+  var PARALLEL = <?!= JSON.stringify(parallel) ?>;   // Pakete gleichzeitig bei Gemini (Link: &parallel=1..12, Standard 6)
   var RETRY_MS = window.PDF_BROWSER_RETRY_MS || 1500;   // Wartezeit vor einem neuen Versuch (Tests verkürzen sie)
   var IMAGE_BUDGET = 12 * 1024 * 1024;   // wie DRIVE_PDF_IMAGE_BUDGET: so viele Bildbytes bleiben bei großen PDFs
 
@@ -230,11 +230,15 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 
   function showResult(plan, ms) {
     el('resBox').style.display = ''; el('diagBox').style.display = '';
-    var counts = { terminology: 0, grammar: 0, style: 0, prompt: 0 };
-    issues.forEach(function(i) { counts[counts.hasOwnProperty(i.type) ? i.type : 'style']++; });
+    var TYPE_LABELS = { terminology: 'Terminologie', grammar: 'Grammatik', spelling: 'Rechtschreibung', style: 'Stil', prompt: 'Prompt' };
+    var counts = {}, order = [];
+    issues.forEach(function(i) {
+      var t = i.type || 'style';
+      if (!counts.hasOwnProperty(t)) { counts[t] = 0; order.push(t); }
+      counts[t]++;
+    });
     el('chips').innerHTML = '<span class="chip"><b>' + issues.length + '</b> Funde</span>' +
-      '<span class="chip">Terminologie <b>' + counts.terminology + '</b></span><span class="chip">Grammatik <b>' + counts.grammar + '</b></span>' +
-      '<span class="chip">Stil <b>' + counts.style + '</b></span>' +
+      order.map(function(t) { return '<span class="chip">' + esc(TYPE_LABELS[t] || t) + ' <b>' + counts[t] + '</b></span>'; }).join('') +
       '<span class="chip"><b>' + plan.pages.toLocaleString('de-DE') + '</b> Seiten · ' + plan.ranges.length + ' Pakete · ' + sec(ms) + '</span>' +
       (failed.length ? '<span class="chip bad">ohne Ergebnis: Seite ' + esc(failed.join(', ')) + '</span>' : '');
     var tb = el('issues');

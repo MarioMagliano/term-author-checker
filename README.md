@@ -113,7 +113,7 @@ baut am Ende den Kommentar-Anhang. Die Kommentare kommen als Incremental Update 
 die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script; dorthin gehen nur die kleinen
 Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prompt, Regeln und Gemini.
 
-- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de`). Datei und Sprache wählen,
+- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de&parallel=8`; `parallel` = Pakete gleichzeitig bei Gemini, 1 bis 12, Standard 6). Datei und Sprache wählen,
   „Mit Gemini prüfen". Ergebnisliste, „Kommentierte PDF erzeugen" (Download) und „Als Sheet exportieren".
   Mit vorbefülltem Link startet nichts von allein, weil eine Prüfung Gemini-Anfragen kostet.
 - **Ablauf:** Datei öffnen → in Pakete teilen → bis zu 6 Pakete gleichzeitig an `apiPdfBrowserCheckPart` (je 3 Versuche;
