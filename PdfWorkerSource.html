@@ -2863,7 +2863,10 @@ async function pdfRebuildAsync_(reader, opts, report) {
 }
 
 // ─── Zustand und Befehle ──────────────────────────────────────────────────
-var S = { reader: null, an: null, cfg: null, parts: [] };
+var S = { reader: null, an: null, cfg: null, splitter: null, whole: false, pageCount: 0 };
+
+var BROWSER_MAX_PART_BYTES = 15 * 1024 * 1024;   // wie DRIVE_PDF_MAX_BYTES (Gemini nimmt ca. 20 MB je Anfrage)
+function _mb_(n) { return (Math.round(n / 104857.6) / 10) + ' MB'; }
 
 function post_(msg, transfer) { self.postMessage(msg, transfer || []); }
 
@@ -2871,8 +2874,10 @@ async function cmdOpen_(m) {
   var t0 = Date.now();
   S.cfg = { url: m.url, token: m.token, size: m.size, block: m.block };
   S.reader = makeRangeReader_(S.cfg);
+  S.splitter = null;
   try {
-    var model = await pdfRebuildAsync_(S.reader, { imageBudget: 0 }, function(step, done, total) {
+    // imageBudget: Bytes an Bildern, die behalten werden (Standard 0 = keine; Infinity = alle).
+    var model = await pdfRebuildAsync_(S.reader, { imageBudget: m.imageBudget === undefined ? 0 : m.imageBudget }, function(step, done, total) {
       post_({ id: m.id, progress: { phase: 'read', step: step, done: done, total: total } });
     });
     S.an = _driveAnnotatedOpen_(model);
@@ -2916,32 +2921,48 @@ function cmdAnnotate_(m) {
   };
 }
 
-// Bereitet die Prüfpakete vor (wie _drivePdfPrepUnit_ in Apps Script): Bilder bis
-// zum Budget behalten, Seiten in Pakete teilen. Pakete bleiben im Worker; über
-// "part" wird eines abgeholt.
-async function cmdSplit_(m) {
-  var t0 = Date.now();
-  var reader = S.reader || makeRangeReader_(m);
-  var model = await pdfRebuildAsync_(reader, { imageBudget: m.imageBudget === undefined ? 12 * 1024 * 1024 : m.imageBudget }, function(step, done, total) {
-    post_({ id: m.id, progress: { phase: 'read', step: step, done: done, total: total } });
-  });
-  var splitter = pdfPageSplitter_({ text: model.text, offsets: model.offsets, compressed: model.compressed,
+// Teilt die geöffnete PDF in Prüfpakete (wie _drivePdfPrepUnit_ in Apps Script):
+// höchstens maxParts Pakete mit je ca. pagesPerPart Seiten. Die Pakete selbst
+// werden erst über "piece" gebaut, eines nach dem anderen.
+function cmdPlan_(m) {
+  if (!S.an) throw new Error('No PDF opened.');
+  var model = S.an.model, per = m.pagesPerPart || 4, maxParts = m.maxParts || 60;
+  S.splitter = null; S.whole = false;
+  try {
+    S.splitter = pdfPageSplitter_({ text: model.text, offsets: model.offsets, compressed: model.compressed,
                                     rootNum: model.rootNum, maxNum: model.maxNum, encrypted: model.encrypted });
-  var n = splitter.pageCount, per = m.pagesPerPart || 4, sizes = [];
-  S.parts = [];
-  for (var from = 0; from < n; from += per) {
-    var piece = splitter.build(from, Math.min(n, from + per));
-    S.parts.push(piece);
-    sizes.push(piece.length);
+  } catch (e) { S.splitter = null; }
+  var n = S.splitter ? S.splitter.pageCount : S.an.pages.length;
+  S.pageCount = n;
+  var count = S.splitter ? Math.min(Math.ceil(n / per), maxParts) : 1;
+  var ranges = [];
+  if (!S.splitter || count <= 1) {
+    S.whole = true;
+    ranges.push([0, n]);
+  } else {
+    var size = Math.ceil(n / Math.max(1, count));
+    for (var from = 0; from < n; from += size) ranges.push([from, Math.min(n, from + size)]);
   }
-  return { result: { pages: n, parts: S.parts.length, sizes: sizes, shrunkBytes: model.text.length,
-                     imagesKept: model.imagesKept, imagesRemoved: model.imagesRemoved,
-                     requests: reader.stats.requests, downloadedBytes: reader.stats.bytes, ms: Date.now() - t0 } };
+  return { result: { pages: n, ranges: ranges, whole: S.whole, shrunkBytes: model.text.length } };
 }
 
-function cmdPart_(m) {
-  var u8 = _binaryStringToU8_(S.parts[m.index]);
-  return { result: { bytes: u8.length }, transfer: [u8.buffer], part: u8 };
+// Baut das Paket für die Seiten [from, to) und liefert es als Base64.
+function cmdPiece_(m) {
+  if (!S.an) throw new Error('No PDF opened.');
+  var str;
+  if (S.whole && m.from === 0 && m.to === S.pageCount) {
+    str = S.an.model.text;
+    if (str.length > BROWSER_MAX_PART_BYTES) {
+      throw new Error('The PDF is still ' + _mb_(str.length) + ' after reduction (limit: ' + _mb_(BROWSER_MAX_PART_BYTES) + '). Please split the PDF.');
+    }
+  } else {
+    if (!S.splitter) throw new Error('This PDF cannot be split into single pages.');
+    str = S.splitter.build(m.from, m.to);
+    if (str.length > BROWSER_MAX_PART_BYTES) {
+      throw new Error('Pages ' + (m.from + 1) + '-' + m.to + ' are still ' + _mb_(str.length) + ' after reduction (limit: ' + _mb_(BROWSER_MAX_PART_BYTES) + '). Please split the PDF.');
+    }
+  }
+  return { result: { bytes: str.length, b64: btoa(str) } };
 }
 
 self.onmessage = async function(ev) {
@@ -2949,8 +2970,8 @@ self.onmessage = async function(ev) {
   try {
     if (m.cmd === 'open') out = await cmdOpen_(m);
     else if (m.cmd === 'annotate') out = cmdAnnotate_(m);
-    else if (m.cmd === 'split') out = await cmdSplit_(m);
-    else if (m.cmd === 'part') out = cmdPart_(m);
+    else if (m.cmd === 'plan') out = cmdPlan_(m);
+    else if (m.cmd === 'piece') out = cmdPiece_(m);
     else throw new Error('Unknown command: ' + m.cmd);
   } catch (err) {
     post_({ id: m.id, error: { message: String(err && err.message || err), fatal: !!(err && err.fatal), structure: !!(err && err.pdfStructure) } });
@@ -2958,7 +2979,6 @@ self.onmessage = async function(ev) {
   }
   var reply = { id: m.id, result: out.result };
   if (out.appendix) reply.appendix = out.appendix;
-  if (out.part) reply.part = out.part;
   post_(reply, out.transfer);
 };
 

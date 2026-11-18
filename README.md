@@ -73,6 +73,7 @@ Danach in Apps Script die Add-on-Bereitstellung und die Web-App-Bereitstellung a
 |---|---|
 | `node test/annotate-flow.cjs` | kompletter Ablauf „kommentierte PDF“ gegen ein simuliertes Drive |
 | `node test/pdf-memory.cjs` | Speicherverbrauch der PDF-Verarbeitung |
+| `node test/browser-api.cjs` | Serverseite der Browser-Prüfung (`PdfBrowserApi.js`) mit Platzhaltern für die Apps-Script-Dienste, echter Gemini-Anfrage- und Antwortcode |
 | `node test/browser-engine.cjs` | PDF-Verarbeitung im Browser (Chromium, Playwright nötig) gegen ein simuliertes Drive, Ergebnis Byte für Byte wie in Apps Script |
 | `node tools/build-pdf-worker.cjs --check` | `PdfWorkerSource.html` ist aktuell |
 | `GeminiTest.js` (im Editor) | Verbindung zu Gemini |
@@ -107,17 +108,24 @@ Use **Deploy → New deployment** (Add-on and Web app) and update both after eac
 
 Sehr große PDFs (200 MB, 3000 Seiten) scheitern in Apps Script an Speicher und Laufzeit, schon beim Öffnen.
 Der Prototyp verlagert die PDF-Arbeit in den Browser: Ein Web Worker liest die Datei stückweise per
-HTTP-Range direkt aus Drive (mit dem eigenen Token der Person), sortiert Bilder aus, sucht die Fundstellen
-und baut den Kommentar-Anhang. Die Kommentare kommen als Incremental Update an das unveränderte Original,
-die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script.
+HTTP-Range direkt aus Drive (mit dem eigenen Token der Person), sortiert Bilder aus, teilt sie in Prüfpakete und
+baut am Ende den Kommentar-Anhang. Die Kommentare kommen als Incremental Update an das unveränderte Original,
+die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script; dorthin gehen nur die kleinen
+Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prompt, Regeln und Gemini.
 
-- **Testseite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...`). Zeigt jeden Schritt mit Zeit und Menge
-  und prüft dabei die Dinge, die sich nur in der echten Umgebung zeigen: Worker startbar, Drive-Zugriff aus dem
-  Browser, Download der Datei.
+- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de`). Datei und Sprache wählen,
+  „Mit Gemini prüfen". Ergebnisliste, „Kommentierte PDF erzeugen" (Download) und „Als Sheet exportieren".
+  Mit vorbefülltem Link startet nichts von allein, weil eine Prüfung Gemini-Anfragen kostet.
+- **Ablauf:** Datei öffnen → in Pakete teilen → bis zu 6 Pakete gleichzeitig an `apiPdfBrowserCheckPart` (je 3 Versuche;
+  scheitert ein Paket, wird es Seite für Seite wiederholt, Seiten ohne Ergebnis werden gemeldet) → Funde ohne
+  Doppelte zusammenführen → Protokoll (`DRIVE_PDF_CHECK_RUN`, mit dem Zusatz „browser").
 - **Gleicher Code:** Der Worker besteht aus denselben Modulen wie Apps Script (`PdfInflate`, `PdfTextPosition`,
   `PdfAnnotate`, `PdfShrink`, `PdfAnnotateSearch`) plus `tools/pdf-worker-main.txt`. Nach jeder Änderung an einem
   Modul `node tools/build-pdf-worker.cjs` ausführen und `PdfWorkerSource.html` mit einchecken.
-- **Noch nicht angeschlossen:** die Prüfung mit Gemini (Pakete vorbereiten kann der Worker schon, `split`).
+- **Noch nicht im Browser-Weg:** Gesamtdokument-Prompts (`DocPrompts.js`). Die Seite zeigt einen Hinweis mit den
+  Namen, wenn für die gewählte Sprache welche aktiv sind.
+- **Prompt-Cache:** Der Prompt wird 5 Minuten je Sprache zwischengespeichert (`CacheService`); Regeländerungen
+  greifen danach.
 
 Gemessen (Chromium, simuliertes Drive mit 100 ms Verzögerung je Anfrage): Eine PDF mit 205 MB und 300 Seiten
 öffnet in ca. 5 s und liest dabei nur ca. 2 MB, weil die Bilder nur angelesen werden (die Struktur kommt in

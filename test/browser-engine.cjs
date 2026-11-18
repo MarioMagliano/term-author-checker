@@ -62,13 +62,16 @@ async function main() {
   const refAppendix = ctx._driveAnnotatedAppendix_(reader, an, refRes.pageAnnotations);
   const refHash = fnv(an.model.text);
   const expectedFile = Buffer.concat([pdf, Buffer.from(refAppendix, 'latin1')]);
-  const refSplit = (function() {
-    const model = ctx.pdfRebuild_(reader, { imageBudget: 12 * 1024 * 1024 });
+  const BUDGET = 12 * 1024 * 1024;
+  const refParts = (function() {
+    const model = ctx.pdfRebuild_(reader, { imageBudget: BUDGET });
     const sp = ctx.pdfPageSplitter_({ text: model.text, offsets: model.offsets, compressed: model.compressed,
                                       rootNum: model.rootNum, maxNum: model.maxNum, encrypted: model.encrypted });
-    const sizes = [];
-    for (let f = 0; f < sp.pageCount; f += 4) sizes.push(sp.build(f, Math.min(sp.pageCount, f + 4)).length);
-    return sizes;
+    const n = sp.pageCount, count = Math.min(Math.ceil(n / 4), 60), per = Math.ceil(n / Math.max(1, count));
+    const ranges = [], pieces = [];
+    for (let f = 0; f < n; f += per) { ranges.push([f, Math.min(n, f + per)]); pieces.push(sp.build(f, Math.min(n, f + per))); }
+    return { n: n, per: per, ranges: ranges, sizes: pieces.map(function(x) { return x.length; }),
+             first: pieces[0], last: pieces[pieces.length - 1], imagesKept: model.imagesKept };
   })();
 
   // ── Server that behaves like Drive ───────────────────────────────────────
@@ -163,11 +166,21 @@ async function main() {
     out.blobSize = blobInfo.size; out.upload = blobInfo.upload;
     const splitInfo = await phase('check parts', async function(p) {
       const t0 = performance.now();
-      const split = await window.__pdf.split({ pagesPerPart: 4 });
-      const part0 = await window.__pdf.part(0);
-      return { split: split, part0: Array.from(part0.subarray(0, 8)), part0Len: part0.length, ms: Math.round(performance.now() - t0) };
-    }, P);
-    out.split = splitInfo.split; out.part0 = splitInfo.part0; out.part0Len = splitInfo.part0Len;
+      const c2 = PdfBrowser.create();
+      const open = await c2.open({ url: p.base + '/pdf', token: p.token, size: p.size, imageBudget: p.budget });
+      const plan = await c2.plan({ pagesPerPart: 4, maxParts: 60 });
+      const sizes = []; let first = '', last = '';
+      for (let i = 0; i < plan.ranges.length; i++) {
+        const piece = await c2.piece(plan.ranges[i][0], plan.ranges[i][1]);
+        sizes.push(piece.bytes);
+        if (i === 0) first = piece.b64;
+        if (i === plan.ranges.length - 1) last = piece.b64;
+      }
+      const single = await c2.piece(0, 1);
+      c2.close();
+      return { open: { imagesKept: open.imagesKept }, plan: plan, sizes: sizes, first: first, last: last, singleBytes: single.bytes, ms: Math.round(performance.now() - t0) };
+    }, Object.assign({ budget: BUDGET }, P));
+    out.split = splitInfo;
     await page.evaluate(function() { window.__pdf.close(); });
     out.ms = { open: out.open.ms2, annotate: ann.ms, blob: blobInfo.ms, split: splitInfo.ms };
 
@@ -196,9 +209,11 @@ async function main() {
     check('original bytes unchanged at the start of the result', uploaded && uploaded.subarray(0, pdf.length).equals(pdf));
     check('every request carried the token', stats.badAuth === 0);
     if (flaky) check('failed requests were repeated', out.open.retries > 0, out.open.retries + ' retries');
-    check('check preparation: same part sizes as reference', JSON.stringify(out.split.sizes) === JSON.stringify(refSplit),
-      out.split.parts + ' parts, ' + out.split.imagesKept + ' images kept');
-    check('part is a PDF', String.fromCharCode.apply(null, out.part0.slice(0, 5)) === '%PDF-' && out.part0Len === refSplit[0]);
+    check('check preparation: same parts as reference', JSON.stringify(out.split.plan.ranges) === JSON.stringify(refParts.ranges) &&
+      JSON.stringify(out.split.sizes) === JSON.stringify(refParts.sizes), out.split.plan.ranges.length + ' parts, ' + out.split.open.imagesKept + ' images kept');
+    check('check preparation: first and last part identical to reference',
+      Buffer.from(out.split.first, 'base64').toString('latin1') === refParts.first && Buffer.from(out.split.last, 'base64').toString('latin1') === refParts.last);
+    check('a single page can be built as its own PDF', out.split.singleBytes > 0 && out.split.singleBytes < refParts.sizes[0]);
 
     // The output must open in a real PDF reader and carry the notes.
     const outFile = arg('out', path.join(require('os').tmpdir(), 'browser-engine-annotated.pdf'));
@@ -211,10 +226,12 @@ async function main() {
     } catch (e) { pyDetail = String(e.message).split('\n')[0]; }
     check('pypdf opens the result: pages and notes present', pyOk, pyDetail);
 
-    // ── The test page (PdfBrowser.html) end to end, Drive and Apps Script simulated ──
+    // ── The page (PdfBrowser.html) end to end: Drive, Apps Script and Gemini simulated ──
     const FILE_ID = 'F'.repeat(33);
     const pageHtml = fs.readFileSync(path.join(__dirname, '..', 'PdfBrowser.html'), 'utf8')
-      .replace('<?= fileId ?>', FILE_ID)
+      .replace('<?= fileId ?>', '')
+      .replace('<?!= JSON.stringify(languages) ?>', function() { return JSON.stringify([['de', 'German'], ['en', 'English']]); })
+      .replace('<?!= JSON.stringify(lastLang) ?>', function() { return JSON.stringify('de'); })
       .replace("<?!= include('PdfWorkerSource'); ?>", function() { return builder.build(); })
       .replace("<?!= include('PdfBrowserClient'); ?>", function() { return client; });
     const ctx2 = await browser.newContext({ acceptDownloads: true });
@@ -233,47 +250,97 @@ async function main() {
     const ui = await ctx2.newPage();
     const uiErrors = [];
     ui.on('pageerror', function(e) { uiErrors.push(e.message); });
-    await ui.addInitScript(function(args) {
-      // google.script.run.withSuccessHandler(f).withFailureHandler(g).apiXyz(arg)
+
+    // Simulated Apps Script + Gemini. Gemini "finds" one issue per checked part: a real line
+    // of the first page of the part. The second part always fails when it has several pages,
+    // so the page has to check it page by page.
+    const srvLog = { prepare: 0, parts: [], failedParts: 0, logged: null, sheetIssues: 0, languages: [] };
+    const quoteOf = function(pageIdx) { return built.lines[pageIdx][3].split(' ').slice(2, 8).join(' '); };
+    await ui.exposeFunction('__srv', function(name, args) {
+      if (name === 'apiPdfBrowserPrepare') {
+        srvLog.prepare++; srvLog.languages.push(args[1]);
+        return { fileId: FILE_ID, name: 'Handbuch <b>1</b>.pdf', size: pdf.length, token: TOKEN, labels: { 'type.grammar': 'Grammar' },
+                 language: args[1], languageName: 'German', docPromptTitles: ['Doc rule A'], docNotes: ['Note about rules'], maxBytes: 15 * 1024 * 1024 };
+      }
+      if (name === 'apiPdfBrowserCheckPart') {
+        const b64 = args[0], meta = args[1];
+        const head = Buffer.from(b64.slice(0, 16), 'base64').toString('latin1').slice(0, 5);
+        srvLog.parts.push({ from: meta.from, to: meta.to, split: meta.split, pdf: head === '%PDF-', imagesRemoved: meta.imagesRemoved });
+        if (meta.from === refParts.per && meta.to - meta.from > 1) { srvLog.failedParts++; return { failed: true, error: 'simulated' }; }
+        return { issues: [{ type: 'grammar', location: 'Page ' + (meta.from + 1), original: quoteOf(meta.from), suggestion: 'fixed ' + meta.from, explanation: 'simulated' }] };
+      }
+      if (name === 'apiPdfBrowserLogRun') { srvLog.logged = args; return true; }
+      if (name === 'apiPdfBrowserExportSheet') { srvLog.sheetIssues = args[0].length; return 'https://sheet.test/report'; }
+      throw new Error('unexpected call ' + name);
+    });
+    await ui.addInitScript(function() {
+      window.PDF_BROWSER_RETRY_MS = 5;
+      // google.script.run.withSuccessHandler(f).withFailureHandler(g).apiXyz(args...)
       window.google = { script: { run: { withSuccessHandler: function(ok) { return { withFailureHandler: function(bad) {
         return new Proxy({}, { get: function(t, name) { return function() {
-          setTimeout(function() {
-            if (name === 'apiPdfBrowserInit') ok({ fileId: args.id, name: 'Handbuch <b>1</b>.pdf', size: args.size, token: args.token, labels: {} });
-            else bad(new Error('unexpected call ' + String(name)));
-          }, 10);
+          const args = Array.prototype.slice.call(arguments);
+          window.__srv(name, args).then(ok, function(e) { bad(new Error(String(e && e.message || e))); });
         }; } });
       } }; } } } };
-    }, { id: FILE_ID, size: pdf.length, token: TOKEN });
-    await ui.goto('https://app.test/');   // fileId is prefilled: the page starts reading right away
-    await ui.waitForSelector('#annBox', { state: 'visible', timeout: 120000 });
+    });
+    await ui.goto('https://app.test/');
+    check('page: language list filled', (await ui.$$eval('#lang option', function(o) { return o.length; })) === 2);
+    await ui.fill('#file', 'https://drive.google.com/file/d/' + FILE_ID + '/view');
+    await ui.selectOption('#lang', 'de');
+    await ui.click('#checkBtn');
+    await ui.waitForSelector('#resBox', { state: 'visible', timeout: 180000 });
     const rows = await ui.$$eval('#steps tr', function(r) { return r.map(function(x) { return x.textContent; }); });
-    const firstWords = built.lines[0][3].split(' ').slice(2, 8).join(' ');
-    await ui.fill('#quote', firstWords);
-    await ui.fill('#pageNo', '1');
+    const notes = await ui.$eval('#notes', function(n) { return n.textContent; });
+    const chips = await ui.$eval('#chips', function(n) { return n.textContent; });
+    const issueRows = await ui.$$eval('#issues tr', function(r) { return r.length - 1; });
+    const nParts = refParts.ranges.length;
+    const expectedIssues = (nParts - 1) + refParts.per;   // every part, except the failing one that is checked page by page
+    check('page: all steps ok, no errors', rows.length >= 6 && rows.every(function(t) { return t.indexOf('✖') === -1; }) && uiErrors.length === 0, uiErrors.join(' | '));
+    check('page: file name is shown as text, not as HTML', rows.join(' ').indexOf('<b>1</b>') !== -1 && (await ui.$$('#steps b')).length === 0);
+    check('page: hint about whole-document prompts shown', notes.indexOf('Doc rule A') !== -1 && notes.indexOf('Note about rules') !== -1);
+    check('page: every part sent to the check as its own PDF', srvLog.parts.length > 0 && srvLog.parts.every(function(x) { return x.pdf; }) &&
+      srvLog.parts.filter(function(x) { return x.to - x.from === refParts.per || x.to === refParts.n; }).length >= nParts, srvLog.parts.length + ' calls for ' + nParts + ' parts');
+    check('page: parts of several pages are marked as split', srvLog.parts.every(function(x) { return x.split === true; }));
+    check('page: failing part was retried and then checked page by page', srvLog.failedParts === 3 &&
+      srvLog.parts.filter(function(x) { return x.to - x.from === 1 && x.from >= refParts.per && x.from < 2 * refParts.per; }).length === refParts.per, srvLog.failedParts + ' failed calls');
+    check('page: issues of all parts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' Funde') !== -1, issueRows + ' of ' + expectedIssues);
+    check('page: run is logged', srvLog.logged && srvLog.logged[0] === 'Handbuch <b>1</b>.pdf' && srvLog.logged[1] === expectedIssues && srvLog.logged[2] === nParts);
+
+    await ui.click('#sheetBtn');
+    await ui.waitForSelector('#sheetLink', { timeout: 30000 });
+    check('page: sheet export gets the issues and shows a link', srvLog.sheetIssues === expectedIssues && (await ui.$eval('#sheetLink', function(a) { return a.href; })) === 'https://sheet.test/report');
+
     await ui.click('#annBtn');
-    await ui.waitForSelector('#dlLink', { timeout: 120000 });
+    await ui.waitForSelector('#dlLink', { timeout: 180000 });
     const dlPromise = ui.waitForEvent('download', { timeout: 120000 });
     await ui.click('#dlLink');
     const dl = await dlPromise;
     const dlPath = path.join(require('os').tmpdir(), 'browser-page-download.pdf');
     await dl.saveAs(dlPath);
     const dlBuf = fs.readFileSync(dlPath);
-    check('test page: all steps ok, no errors', rows.length >= 4 && rows.every(function(t) { return t.indexOf('✖') === -1; }) && uiErrors.length === 0, uiErrors.join(' | '));
-    check('test page: file name is shown as text, not as HTML', rows.join(' ').indexOf('<b>1</b>') !== -1 && (await ui.$$('#steps b')).length === 0);
-    check('test page: download = original + appendix', dlBuf.subarray(0, pdf.length).equals(pdf) && dlBuf.length > pdf.length,
+    check('page: download = original + appendix', dlBuf.subarray(0, pdf.length).equals(pdf) && dlBuf.length > pdf.length,
       mb(dlBuf.length) + ' MB, download name ' + dl.suggestedFilename());
     let uiPy = '';
     try {
-      const py = "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\na=r.pages[0].get('/Annots') or []\nprint(len(r.pages), len(a), any('Browser' in str(x.get_object().get('/Contents','')) for x in a))";
+      const py = "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nn=sum(len(p.get('/Annots') or []) for p in r.pages)\nprint(len(r.pages), n)";
       uiPy = execFileSync('python3', ['-c', py, dlPath], { encoding: 'utf8' }).trim();
     } catch (e) { uiPy = String(e.message).split('\n')[0]; }
-    check('test page: note with the entered text is on page 1', uiPy === pageCount + ' 2 True', uiPy);
+    // Every issue quotes a real line, so each gets a note and a highlight.
+    check('page: every issue is a note and a highlight in the downloaded PDF', uiPy === pageCount + ' ' + (2 * expectedIssues), uiPy);
+
+    // Diagnostic probe on the same opened file.
+    await ui.click('#diagBox summary');
+    await ui.fill('#quote', quoteOf(0));
+    await ui.fill('#pageNo', '1');
+    await ui.click('#probeBtn');
+    await ui.waitForSelector('#probeLink', { timeout: 180000 });
+    check('page: probe comment works on the opened file', (await ui.$eval('#probeMsg', function(n) { return n.textContent; })).indexOf('1 von 1') !== -1);
     await ctx2.close();
 
     console.log('\nopen      ' + out.ms.open + ' ms, ' + out.open.requests + ' requests, downloaded ' + mb(out.open.downloadedBytes) + ' MB, retries ' + out.open.retries);
     console.log('annotate  ' + out.ms.annotate + ' ms, ' + out.ann.slices + ' slices');
     console.log('result    ' + out.ms.blob + ' ms (original + appendix as file)');
-    console.log('parts     ' + out.ms.split + ' ms (check preparation, ' + out.split.parts + ' parts)');
+    console.log('parts     ' + out.ms.split + ' ms (check preparation, ' + out.split.plan.ranges.length + ' parts)');
     console.log('server    ' + stats.requests + ' requests, ' + mb(stats.bytes) + ' MB served, latency ' + latency + ' ms per request, at most ' + stats.maxInflight + ' at the same time');
     console.log('browser   peak memory over start (all Chromium processes):');
     Object.keys(phasePeak).forEach(function(k) { console.log('          ' + (k + '          ').slice(0, 14) + '+' + mb(phasePeak[k]) + ' MB'); });

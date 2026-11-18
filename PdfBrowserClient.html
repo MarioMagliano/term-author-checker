@@ -54,10 +54,14 @@ var PdfBrowser = (function() {
     }
 
     return {
-      /** c: { fileId | url, token, size } - Datei öffnen, Struktur lesen (ohne Bilder). */
+      /**
+       * c: { fileId | url, token, size, imageBudget? } - Datei öffnen, Struktur lesen.
+       * imageBudget: Bytes an Bildern, die behalten werden (Standard 0; Infinity = alle).
+       */
       open: function(c, onProgress) {
         cfg = { url: c.url || driveUrl(c.fileId), token: c.token, size: c.size, block: c.block };
-        return call({ cmd: 'open', url: cfg.url, token: cfg.token, size: cfg.size, block: cfg.block }, [], onProgress).then(function(m) { return m.result; });
+        return call({ cmd: 'open', url: cfg.url, token: cfg.token, size: cfg.size, block: cfg.block, imageBudget: c.imageBudget }, [], onProgress)
+          .then(function(m) { return m.result; });
       },
       /** Fundstellen suchen und Anhang bauen. Liefert { count, positioned, ..., appendix: Uint8Array }. */
       annotate: function(issues, labels, onProgress) {
@@ -65,14 +69,15 @@ var PdfBrowser = (function() {
           var r = m.result; r.appendix = m.appendix; return r;
         });
       },
-      /** Prüfpakete vorbereiten (Bilder bis zum Budget behalten, Seiten teilen). */
-      split: function(opts, onProgress) {
+      /** Prüfpakete planen: { pages, ranges: [[von, bis), ...], whole }. Seiten ab 0. */
+      plan: function(opts) {
         var o = opts || {};
-        return call({ cmd: 'split', url: cfg && cfg.url, token: cfg && cfg.token, size: cfg && cfg.size,
-                      pagesPerPart: o.pagesPerPart, imageBudget: o.imageBudget }, [], onProgress).then(function(m) { return m.result; });
+        return call({ cmd: 'plan', pagesPerPart: o.pagesPerPart, maxParts: o.maxParts }).then(function(m) { return m.result; });
       },
-      /** Ein Paket (PDF-Bytes) aus split() holen. */
-      part: function(index) { return call({ cmd: 'part', index: index }).then(function(m) { return m.part; }); },
+      /** Paket für die Seiten [from, to): { bytes, b64 } (PDF als Base64). */
+      piece: function(from, to) {
+        return call({ cmd: 'piece', from: from, to: to }).then(function(m) { return m.result; });
+      },
       /**
        * Setzt die kommentierte PDF zusammen: Original unverändert (stückweise
        * von Drive) + Anhang. Ein Blob größerer Dateien hält der Browser auf der
