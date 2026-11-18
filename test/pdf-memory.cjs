@@ -15,7 +15,7 @@ const vm = require('vm');
 const zlib = require('zlib');
 
 const ROOT = path.join(__dirname, '..');
-const FILES = ['PdfInflate.js', 'PdfTextPosition.js', 'PdfAnnotate.js', 'PdfShrink.js', 'DocPrompts.js', 'DriveAddon.js'];
+const FILES = ['PdfInflate.js', 'PdfTextPosition.js', 'PdfAnnotate.js', 'PdfShrink.js', 'PdfAnnotateSearch.js', 'DocPrompts.js', 'DriveAddon.js'];
 const PEAK_LIMIT_MB = 60;
 
 function loadContext() {
@@ -52,8 +52,12 @@ function pageLines(pageNo, linesPerPage) {
   return lines;
 }
 
-/** Returns { pdf: Buffer, lines: [[line, ...] per page] }. */
-function buildPdf(pageCount, linesPerPage) {
+/**
+ * Returns { pdf: Buffer, lines: [[line, ...] per page] }.
+ * imageBytes (optional): every page also gets one JPEG-like image object of
+ * this size (random bytes), to build large, image-heavy documents.
+ */
+function buildPdf(pageCount, linesPerPage, imageBytes) {
   const chunks = [];
   const offsets = [];
   let pos = 0;
@@ -62,12 +66,14 @@ function buildPdf(pageCount, linesPerPage) {
 
   put('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
   const fontNum = 3, firstPage = 4;
+  const perPage = imageBytes ? 3 : 2;
   const kids = [];
-  for (let p = 0; p < pageCount; p++) kids.push((firstPage + p * 2) + ' 0 R');
+  for (let p = 0; p < pageCount; p++) kids.push((firstPage + p * perPage) + ' 0 R');
   obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
   obj(2, '<< /Type /Pages /Count ' + pageCount + ' /MediaBox [0 0 595 842] /Kids [' + kids.join(' ') + '] >>');
   obj(fontNum, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
 
+  const noise = imageBytes ? require('crypto').randomBytes(Math.min(imageBytes, 1 << 20)) : null;
   const allLines = [];
   for (let p = 0; p < pageCount; p++) {
     const lines = pageLines(p + 1, linesPerPage);
@@ -75,16 +81,26 @@ function buildPdf(pageCount, linesPerPage) {
     let content = 'BT /F1 9 Tf 12 TL 50 800 Td\n';
     lines.forEach(function(line) { content += '(' + line + ') Tj T*\n'; });
     content += 'ET\n';
+    if (imageBytes) content += 'q 100 0 0 100 400 40 cm /Im1 Do Q\n';
     const packed = zlib.deflateSync(Buffer.from(content, 'latin1'));
-    const pageNum = firstPage + p * 2, contNum = pageNum + 1;
-    obj(pageNum, '<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 ' + fontNum + ' 0 R >> >> /Contents ' + contNum + ' 0 R >>');
+    const pageNum = firstPage + p * perPage, contNum = pageNum + 1, imgNum = pageNum + 2;
+    obj(pageNum, '<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 ' + fontNum + ' 0 R >>' +
+      (imageBytes ? ' /XObject << /Im1 ' + imgNum + ' 0 R >>' : '') + ' >> /Contents ' + contNum + ' 0 R >>');
     offsets[contNum] = pos;
     put(contNum + ' 0 obj\n<< /Length ' + packed.length + ' /Filter /FlateDecode >>\nstream\n');
     put(packed);
     put('\nendstream\nendobj\n');
+    if (imageBytes) {
+      offsets[imgNum] = pos;
+      put(imgNum + ' 0 obj\n<< /Type /XObject /Subtype /Image /Width 1000 /Height 1000 /ColorSpace /DeviceRGB ' +
+        '/BitsPerComponent 8 /Filter /DCTDecode /Length ' + imageBytes + ' >>\nstream\n');
+      let left = imageBytes;
+      while (left > 0) { const n = Math.min(left, noise.length); put(noise.subarray(0, n)); left -= n; }
+      put('\nendstream\nendobj\n');
+    }
   }
 
-  const size = firstPage + pageCount * 2;
+  const size = firstPage + pageCount * perPage;
   const xrefPos = pos;
   let xref = 'xref\n0 ' + size + '\n0000000000 65535 f \n';
   for (let n = 1; n < size; n++) xref += String(offsets[n]).padStart(10, '0') + ' 00000 n \n';
@@ -205,4 +221,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { ROOT: ROOT, FILES: FILES, buildPdf: buildPdf, buildIssues: buildIssues };
+module.exports = { ROOT: ROOT, FILES: FILES, buildPdf: buildPdf, buildIssues: buildIssues, loadContext: loadContext };

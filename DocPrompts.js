@@ -383,10 +383,3 @@ function _activeFileName_() {
     return 'Document';
   }
 }
-
-// Anzeige-Kategorie eines Fundes: terminology, grammar, prompt (Gesamtdokument-
-// Prompt) oder style (alles andere).
-function _issueTypeKey_(issue) {
-  var t = issue && issue.type;
-  return (t === 'terminology' || t === 'grammar' || t === 'prompt') ? t : 'style';
-}
