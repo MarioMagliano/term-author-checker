@@ -232,11 +232,15 @@ async function main() {
     fs.writeFileSync(outFile, uploaded || Buffer.alloc(0));
     let pyOk = false, pyDetail = '';
     try {
-      const py = "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nn=sum(len(p.get('/Annots') or []) for p in r.pages)\nprint(len(r.pages), n)";
+      // One annotation per finding: a highlight that carries the comment itself; a note only where the passage was not found.
+      const py = "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nA=[a.get_object() for p in r.pages for a in (p.get('/Annots') or [])]\n" +
+        "hl=[a for a in A if a.get('/Subtype')=='/Highlight']\ntx=[a for a in A if a.get('/Subtype')=='/Text']\n" +
+        "print(len(r.pages), len(A), len(hl), len(tx), sum(1 for a in hl if a.get('/Contents') and a.get('/T')))";
       const o = execFileSync('python3', ['-c', py, outFile], { encoding: 'utf8' }).trim().split(' ').map(Number);
-      pyOk = o[0] === pageCount && o[1] >= refRes.count; pyDetail = o[0] + ' pages, ' + o[1] + ' annotations';
+      pyOk = o[0] === pageCount && o[1] === refRes.count && o[2] === refRes.positioned && o[3] === refRes.count - refRes.positioned && o[4] === o[2];
+      pyDetail = o[0] + ' pages, ' + o[1] + ' annotations for ' + refRes.count + ' findings (' + o[2] + ' highlights with comment, ' + o[3] + ' notes)';
     } catch (e) { pyDetail = String(e.message).split('\n')[0]; }
-    check('pypdf opens the result: pages and notes present', pyOk, pyDetail);
+    check('pypdf opens the result: exactly one annotation per finding (highlight with the comment, or a note if not found)', pyOk, pyDetail);
 
     // ── The page (PdfBrowser.html) end to end: Drive, Apps Script and Gemini simulated ──
     const FILE_ID = 'F'.repeat(33);
@@ -369,8 +373,8 @@ async function main() {
       const py = "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nn=sum(len(p.get('/Annots') or []) for p in r.pages)\nprint(len(r.pages), n)";
       uiPy = execFileSync('python3', ['-c', py, dlPath], { encoding: 'utf8' }).trim();
     } catch (e) { uiPy = String(e.message).split('\n')[0]; }
-    // Every issue quotes a real line, so each gets a note and a highlight.
-    check('page: every issue is a note and a highlight in the downloaded PDF', uiPy === pageCount + ' ' + (2 * expectedIssues), uiPy);
+    // Every issue quotes a real line, so each gets a highlight that carries the comment.
+    check('page: every finding is exactly one comment in the downloaded PDF', uiPy === pageCount + ' ' + expectedIssues, uiPy);
 
     // Filter: a category can be switched off; list, buttons and both exports follow.
     const catCount = async function(c) { return ui.$eval('#chips [data-cat="' + c + '"] b', function(b) { return parseInt(b.textContent, 10); }); };
@@ -399,7 +403,7 @@ async function main() {
     let uiPy2 = '';
     try { uiPy2 = execFileSync('python3', ['-c', "import sys,pypdf\nr=pypdf.PdfReader(sys.argv[1])\nprint(len(r.pages), sum(len(p.get('/Annots') or []) for p in r.pages))", dl2Path], { encoding: 'utf8' }).trim(); }
     catch (e) { uiPy2 = String(e.message).split('\n')[0]; }
-    check('page: the commented PDF only contains the findings that are switched on', uiPy2 === pageCount + ' ' + (2 * filteredCount), uiPy2);
+    check('page: the commented PDF only contains the findings that are switched on', uiPy2 === pageCount + ' ' + filteredCount, uiPy2);
     await ui.click('#chipAll');
     check('page: "alle anzeigen" switches everything on again',
       (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === expectedIssues && (await ui.$$('#chipAll')).length === 0 &&

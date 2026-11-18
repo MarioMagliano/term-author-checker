@@ -29,7 +29,7 @@ var PDF_ANNOT_MODEL_CACHE_PAGES = 8;
 // Ohne Unterbrechung enthält das Ergebnis done: true.
 function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
   opts = opts || {};
-  var st = opts.resume || { next: 0, pageAnnotations: {}, iconsOnPage: {}, occurrenceUsed: {}, positioned: 0, pageWs: {} };
+  var st = opts.resume || { next: 0, pageAnnotations: {}, occurrenceUsed: {}, positioned: 0, pageWs: {} };
   var STOP = {};
   var builtThisRun = 0;
 
@@ -74,7 +74,6 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
 
   var capped = issues.slice(0, PDF_ANNOT_MAX_PER_PDF);
   var pageAnnotations = st.pageAnnotations;
-  var iconsOnPage = st.iconsOnPage;        // pageIdx -> bereits belegte Icon-Rechtecke
   var occurrenceUsed = st.occurrenceUsed;  // gleiches Zitat mehrfach gemeldet -> nächstes Vorkommen nehmen
 
   // Sucht die Stelle eines Fundes: { page, hit, model } oder STOP. Ändert bis
@@ -131,48 +130,13 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
     if (found.hit) {
       st.positioned++;
       ann.highlight = found.hit.boxes;
-      if (!iconsOnPage[pageIdx]) iconsOnPage[pageIdx] = [];
-      ann.rect = _pdfPlaceNoteIcon_(pages[pageIdx].mediaBox || [0, 0, 612, 792],
-        found.model, found.hit.boxes[0], iconsOnPage[pageIdx]);
-    } // sonst: kein rect -> automatischer Stapel-Fallback oben links
+    } // sonst: keine Markierung -> Notiz oben links auf der Seite (pdfAnnotationUpdate_)
 
     if (!pageAnnotations[pageIdx]) pageAnnotations[pageIdx] = [];
     pageAnnotations[pageIdx].push(ann);
   }
 
   return { done: true, pageAnnotations: pageAnnotations, count: capped.length, total: issues.length, positioned: st.positioned };
-}
-
-/**
- * Platziert das Sticky-Note-Icon im Seitenrand auf Höhe der ersten markierten
- * Zeile (im breiteren Rand neben dem Textblock), damit es keinen Text
- * verdeckt. Ist die Stelle schon durch ein anderes Icon belegt, wird der
- * gegenüberliegende Rand genommen, danach schrittweise tiefer.
- */
-function _pdfPlaceNoteIcon_(mediaBox, model, lineBox, placed) {
-  var size = 20, gap = 4, edge = 2;
-  var yMid = (lineBox[1] + lineBox[3]) / 2;
-  var y = Math.min(mediaBox[3] - size - edge, Math.max(mediaBox[1] + edge, yMid - size / 2));
-  var leftX = Math.max(mediaBox[0] + edge, model.textLeft - size - gap);
-  var rightX = Math.min(mediaBox[2] - size - edge, model.textRight + gap);
-  // Linker Rand bevorzugt; ist er zu schmal (oder schon belegt), der rechte.
-  var columns = (model.textLeft - mediaBox[0] >= mediaBox[2] - model.textRight) ? [leftX, rightX] : [rightX, leftX];
-
-  function overlaps(r) {
-    return placed.some(function(o) { return r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]; });
-  }
-  var rect = null;
-  // Beide Ränder auf Zeilenhöhe probieren, danach schrittweise tiefer.
-  for (var row = 0; row < 20 && !rect; row++) {
-    var ry = Math.max(mediaBox[1] + edge, y - row * (size + 2));
-    for (var c = 0; c < columns.length && !rect; c++) {
-      var cand = [columns[c], ry, columns[c] + size, ry + size];
-      if (!overlaps(cand)) rect = cand;
-    }
-  }
-  if (!rect) rect = [columns[0], y, columns[0] + size, y + size];
-  placed.push(rect);
-  return rect;
 }
 
 /**
