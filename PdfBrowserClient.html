@@ -17,6 +17,7 @@
 var PdfBrowser = (function() {
   var DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files/';
   var DOWNLOAD_CHUNK = 16 * 1024 * 1024;
+  var DOWNLOAD_PARALLEL = 4;
 
   function driveUrl(fileId) {
     return DRIVE_FILES + encodeURIComponent(fileId) + '?alt=media&supportsAllDrives=true';
@@ -54,9 +55,9 @@ var PdfBrowser = (function() {
 
     return {
       /** c: { fileId | url, token, size } - Datei öffnen, Struktur lesen (ohne Bilder). */
-      open: function(c) {
+      open: function(c, onProgress) {
         cfg = { url: c.url || driveUrl(c.fileId), token: c.token, size: c.size, block: c.block };
-        return call({ cmd: 'open', url: cfg.url, token: cfg.token, size: cfg.size, block: cfg.block }).then(function(m) { return m.result; });
+        return call({ cmd: 'open', url: cfg.url, token: cfg.token, size: cfg.size, block: cfg.block }, [], onProgress).then(function(m) { return m.result; });
       },
       /** Fundstellen suchen und Anhang bauen. Liefert { count, positioned, ..., appendix: Uint8Array }. */
       annotate: function(issues, labels, onProgress) {
@@ -65,10 +66,10 @@ var PdfBrowser = (function() {
         });
       },
       /** Prüfpakete vorbereiten (Bilder bis zum Budget behalten, Seiten teilen). */
-      split: function(opts) {
+      split: function(opts, onProgress) {
         var o = opts || {};
         return call({ cmd: 'split', url: cfg && cfg.url, token: cfg && cfg.token, size: cfg && cfg.size,
-                      pagesPerPart: o.pagesPerPart, imageBudget: o.imageBudget }).then(function(m) { return m.result; });
+                      pagesPerPart: o.pagesPerPart, imageBudget: o.imageBudget }, [], onProgress).then(function(m) { return m.result; });
       },
       /** Ein Paket (PDF-Bytes) aus split() holen. */
       part: function(index) { return call({ cmd: 'part', index: index }).then(function(m) { return m.part; }); },
@@ -81,19 +82,28 @@ var PdfBrowser = (function() {
         // Jedes Stück wandert sofort in den Blob (Blob-Teile werden nicht kopiert,
         // der Browser legt sie selbst ab) - der Arbeitsspeicher hält so nie mehr
         // als ein Stück.
-        var blob = new Blob([], { type: 'application/pdf' }), pos = 0;
+        // Mehrere Stücke gleichzeitig laden (eine einzelne Verbindung ist bei Drive
+        // oft langsamer als die Leitung), der Reihe nach in den Blob legen.
+        var blob = new Blob([], { type: 'application/pdf' }), starts = [], idx = 0, got = 0;
+        for (var s = 0; s < cfg.size; s += DOWNLOAD_CHUNK) starts.push(s);
         function next() {
-          if (pos >= cfg.size) return Promise.resolve(new Blob([blob, appendix], { type: 'application/pdf' }));
-          var from = pos, to = Math.min(cfg.size, pos + DOWNLOAD_CHUNK) - 1;
-          return getChunk(from, to, 0).then(function(buf) {
-            blob = new Blob([blob, buf], { type: 'application/pdf' });
-            pos = to + 1;
-            if (onProgress) onProgress({ phase: 'download', done: pos, total: cfg.size });
+          if (idx >= starts.length) return Promise.resolve(new Blob([blob, appendix], { type: 'application/pdf' }));
+          var batch = starts.slice(idx, idx + DOWNLOAD_PARALLEL);
+          idx += batch.length;
+          return Promise.all(batch.map(function(from) {
+            var to = Math.min(cfg.size, from + DOWNLOAD_CHUNK) - 1;
+            return getChunk(from, to, 0).then(function(buf) {
+              got += buf.byteLength;
+              if (onProgress) onProgress({ phase: 'download', done: got, total: cfg.size });
+              return buf;
+            });
+          })).then(function(bufs) {
+            blob = new Blob([blob].concat(bufs), { type: 'application/pdf' });
             return next();
           });
         }
         function getChunk(from, to, attempt) {
-          return fetch(cfg.url, { headers: { Authorization: 'Bearer ' + cfg.token, Range: 'bytes=' + from + '-' + to } })
+          return fetch(cfg.url, { cache: 'no-store', headers: { Authorization: 'Bearer ' + cfg.token, Range: 'bytes=' + from + '-' + to } })
             .then(function(res) {
               if (res.status === 206) return res.arrayBuffer();
               if (res.status === 200 && from === 0 && to + 1 >= cfg.size) return res.arrayBuffer();

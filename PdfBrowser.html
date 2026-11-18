@@ -110,7 +110,11 @@ a.dl{ display:inline-block; margin-top:12px; padding:10px 18px; background:var(-
 
     s = step('PDF öffnen (Struktur lesen, Bilder aussortieren)');
     try {
-      var o = await pdf.open({ fileId: info.fileId, token: info.token, size: info.size });
+      var o = await pdf.open({ fileId: info.fileId, token: info.token, size: info.size }, function(p) {
+        // Schritt 0 = Objekte lesen (20 bis 90 %), Schritt 1 = große Objekte nachladen (90 bis 100 %).
+        var r = p.done / Math.max(1, p.total);
+        bar(p.step === 0 ? 20 + Math.round(70 * r) : 90 + Math.round(10 * r));
+      });
       done(s, sec(o.ms), o.pages.toLocaleString('de-DE') + ' Seiten · ' + mb(o.downloadedBytes) + ' gelesen in ' + o.requests + ' Anfragen · ohne Bilder ' + mb(o.shrunkBytes));
       if (o.encrypted) throw new Error('Verschlüsselte PDFs können nicht kommentiert werden.');
       el('pageNo').max = o.pages;

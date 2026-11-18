@@ -181,14 +181,23 @@ function _pdfPlaceNoteIcon_(mediaBox, model, lineBox, placed) {
  */
 function _driveAnnotatedAnalyze_(reader) {
   try {
-    var model = pdfRebuild_(reader, { imageBudget: 0 });
-    var doc = _pdfOpenDoc_(model.text, model.offsets);
-    var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
-    return { model: model, doc: doc, pages: pages };
+    return _driveAnnotatedOpen_(pdfRebuild_(reader, { imageBudget: 0 }));
   } catch (err) {
-    if (!/^Drive download/.test(err.message || '')) err.pdfStructure = true;
-    throw err;
+    throw _driveAnnotatedStructureError_(err);
   }
+}
+
+/** Aus dem Modell der neu aufgebauten PDF: Dokument-Zugriff und Seiten. */
+function _driveAnnotatedOpen_(model) {
+  var doc = _pdfOpenDoc_(model.text, model.offsets);
+  var pages = _pdfCollectPages_(model.text, model.offsets, model.rootNum, doc);
+  return { model: model, doc: doc, pages: pages };
+}
+
+/** Markiert Fehler der PDF-Struktur (im Gegensatz zu Lesefehlern von Drive). */
+function _driveAnnotatedStructureError_(err) {
+  if (!/^Drive download/.test(err.message || '')) err.pdfStructure = true;
+  return err;
 }
 
 function _driveAnnotatedRequirePlain_(an) {

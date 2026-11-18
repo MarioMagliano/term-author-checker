@@ -72,7 +72,7 @@ async function main() {
   })();
 
   // ── Server that behaves like Drive ───────────────────────────────────────
-  const stats = { requests: 0, bytes: 0, badAuth: 0 };
+  const stats = { requests: 0, bytes: 0, badAuth: 0, inflight: 0, maxInflight: 0 };
   let uploaded = null;
   const client = fs.readFileSync(path.join(__dirname, '..', 'PdfBrowserClient.html'), 'utf8');
   const html = '<!doctype html><meta charset="utf-8"><body>' + builder.build() + client + '</body>';
@@ -82,7 +82,9 @@ async function main() {
       if (req.headers.authorization !== 'Bearer ' + TOKEN) { stats.badAuth++; res.writeHead(401); res.end(); return; }
       const m = /bytes=(\d+)-(\d+)/.exec(req.headers.range || '');
       if (flaky && ++flakyCount % 3 === 0) { res.writeHead(503); res.end(); return; }
+      stats.inflight++; stats.maxInflight = Math.max(stats.maxInflight, stats.inflight);
       setTimeout(function() {
+        stats.inflight--;
         stats.requests++;
         if (!m) { res.writeHead(200, { 'Content-Length': pdf.length }); res.end(pdf); stats.bytes += pdf.length; return; }
         const s = parseInt(m[1], 10), e = Math.min(pdf.length - 1, parseInt(m[2], 10));
@@ -175,6 +177,10 @@ async function main() {
     check('rebuilt (image-free) PDF identical to reference', out.open.shrunkHash === refHash && out.open.shrunkBytes === an.model.text.length,
       mb(out.open.shrunkBytes) + ' MB from ' + mb(pdf.length) + ' MB');
     check('all images removed in annotate mode', out.open.imagesRemoved === pageCount && out.open.imagesKept === 0);
+    // Images are the bulk of the file; they must only be peeked at, not downloaded.
+    // (Objects below 128 KB are read as a whole by design, so this only holds for big images.)
+    check('images are not downloaded', imageKb * 1024 <= 128 * 1024 || out.open.downloadedBytes < pdf.length * 0.25,
+      mb(out.open.downloadedBytes) + ' MB read of ' + mb(pdf.length) + ' MB in ' + out.open.requests + ' requests');
     check('annotation count and positions identical', out.ann.count === refRes.count && out.ann.positioned === refRes.positioned,
       out.ann.positioned + ' positioned of ' + out.ann.count);
     let appDetail = Math.round(out.ann.appendixBytes / 1024) + ' KB';
@@ -268,7 +274,7 @@ async function main() {
     console.log('annotate  ' + out.ms.annotate + ' ms, ' + out.ann.slices + ' slices');
     console.log('result    ' + out.ms.blob + ' ms (original + appendix as file)');
     console.log('parts     ' + out.ms.split + ' ms (check preparation, ' + out.split.parts + ' parts)');
-    console.log('server    ' + stats.requests + ' requests, ' + mb(stats.bytes) + ' MB served, latency ' + latency + ' ms per request');
+    console.log('server    ' + stats.requests + ' requests, ' + mb(stats.bytes) + ' MB served, latency ' + latency + ' ms per request, at most ' + stats.maxInflight + ' at the same time');
     console.log('browser   peak memory over start (all Chromium processes):');
     Object.keys(phasePeak).forEach(function(k) { console.log('          ' + (k + '          ').slice(0, 14) + '+' + mb(phasePeak[k]) + ' MB'); });
   } finally {

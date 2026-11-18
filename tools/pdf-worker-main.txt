@@ -4,8 +4,12 @@
 // Diese Datei hängt "tools/build-pdf-worker.cjs" hinter die PDF-Module
 // (PdfInflate, PdfTextPosition, PdfAnnotate, PdfShrink, PdfAnnotateSearch). Sie
 // stellt nur her, was die Module aus Apps Script gewohnt sind:
-//  - einen Leser, der Bytebereiche der PDF in Drive per HTTP-Range holt
-//    (synchron, das geht im Worker; die Module sind synchron geschrieben),
+//  - einen Leser für Bytebereiche der PDF in Drive (HTTP-Range):
+//      read()          synchron, für die Struktur (Cross-Reference, letztes Byte);
+//                      liest in kleinen Blöcken
+//      readManyAsync() viele Bereiche PARALLEL per fetch; damit werden die
+//                      Objekte gelesen. Große Objekte (Bilder) werden nur
+//                      angelesen (4 KB) und nicht heruntergeladen.
 //  - Logger und _ct_ (Beschriftung der Notizen),
 //  - eine kleine Nachrichten-Schnittstelle zur Seite.
 // Die Datei hat bewusst die Endung .txt: clasp soll sie nicht als Apps-Script-
@@ -16,8 +20,9 @@ var Logger = { log: function() {} };
 var _ctLabels_ = {};
 function _ct_(key) { return Object.prototype.hasOwnProperty.call(_ctLabels_, key) ? _ctLabels_[key] : key; }
 
-var BROWSER_BLOCK = 8 * 1024 * 1024;   // Größe einer Range-Anfrage (wie PDF_SHRINK_CHUNK)
-var BROWSER_CACHE_BLOCKS = 3;          // so viele Blöcke bleiben im Speicher
+var BROWSER_BLOCK = 1024 * 1024;       // Block der synchronen Lesung (Struktur am Dateiende)
+var BROWSER_CACHE_BLOCKS = 4;          // so viele Blöcke bleiben im Speicher
+var BROWSER_PARALLEL = 24;             // gleichzeitige Range-Anfragen beim Lesen der Objekte
 var BROWSER_RETRIES = 4;
 
 function _bytesToBinaryString_(u8) {
@@ -40,24 +45,27 @@ function _fnv_(s) {
 }
 
 function _busyWait_(ms) { var end = Date.now() + ms; while (Date.now() < end) { /* kurze Pause zwischen Wiederholungen */ } }
+function _sleep_(ms) { return new Promise(function(res) { setTimeout(res, ms); }); }
+
+function _driveError_(status) {
+  var e = new Error('Drive download failed (HTTP ' + status + ').');
+  if (status === 401) { e.message = 'Drive session expired (HTTP 401). Please start again.'; e.fatal = true; }
+  if (status === 404) e.fatal = true;
+  return e;
+}
 
 /**
- * Leser (read/readMany/size wie _pdfDriveRangeReader_), gespeist per
- * synchroner XMLHttpRequest. cfg: { url, token, size, block? }.
- * Gelesen wird in festen Blöcken; ein kleiner Cache sorgt dafür, dass
- * aufeinanderfolgende kleine Lesungen (die Objekte der PDF) nur eine Anfrage
- * kosten. Bilder werden dadurch zwar mitgeladen, aber nie behalten - die Datei
- * wird einmal durchgelesen, nicht komplett im Speicher gehalten.
+ * Leser (read/readMany/size wie _pdfDriveRangeReader_, dazu readManyAsync).
+ * cfg: { url, token, size, block? }.
+ * Blöcke bleiben als Bytes (Uint8Array) im Cache und werden erst beim Lesen in
+ * einen Text umgewandelt. Ein Teilstring (slice) eines großen Textes hielte den
+ * ganzen Block im Speicher.
  */
 function makeRangeReader_(cfg) {
   var block = cfg.block || BROWSER_BLOCK;
   var cache = {}, order = [];
   var stats = { requests: 0, bytes: 0, retries: 0 };
 
-  // Blöcke bleiben als Bytes (Uint8Array) im Cache und werden erst beim Lesen in
-  // einen Text umgewandelt. Ein Teilstring (slice) eines großen Textes hielte den
-  // ganzen Block im Speicher - bei einer Datei mit vielen Bildern also die ganze
-  // Datei.
   function fetchBlock(idx) {
     var start = idx * block, end = Math.min(cfg.size, start + block) - 1;
     for (var attempt = 0; ; attempt++) {
@@ -69,7 +77,6 @@ function makeRangeReader_(cfg) {
         xhr.setRequestHeader('Range', 'bytes=' + start + '-' + end);
         xhr.send(null);
         stats.requests++;
-        if (xhr.status === 401) { var e401 = new Error('Drive session expired (HTTP 401). Please start again.'); e401.fatal = true; throw e401; }
         if (xhr.status === 206 || xhr.status === 200) {
           var u8 = new Uint8Array(xhr.response);
           // Range ignoriert (HTTP 200 mit der ganzen Datei): passenden Teil nehmen.
@@ -77,8 +84,7 @@ function makeRangeReader_(cfg) {
           stats.bytes += u8.length;
           return u8;
         }
-        if (xhr.status === 403 || xhr.status === 404) { var eF = new Error('Drive download failed (HTTP ' + xhr.status + ').'); eF.fatal = true; throw eF; }
-        throw new Error('Drive download failed (HTTP ' + xhr.status + ').');
+        throw _driveError_(xhr.status);
       } catch (err) {
         if (err.fatal || attempt >= BROWSER_RETRIES) throw err;
         stats.retries++;
@@ -113,31 +119,105 @@ function makeRangeReader_(cfg) {
     return out.join('');
   }
 
+  // Ein Bereich [start, end) per fetch, mit Wiederholung (Drive begrenzt Anfragen
+  // pro Sekunde und antwortet dann mit 403/429; auch 5xx kommen vor).
+  async function fetchRange(start, end) {
+    end = Math.min(end, cfg.size);
+    if (start >= end) return '';
+    for (var attempt = 0; ; attempt++) {
+      try {
+        var headers = { Range: 'bytes=' + start + '-' + (end - 1) };
+        if (cfg.token) headers.Authorization = 'Bearer ' + cfg.token;
+        // cache: 'no-store' ist wichtig: Alle Bereiche haben dieselbe Adresse (nur der
+        // Range-Header unterscheidet sie), und der HTTP-Cache des Browsers reiht
+        // Anfragen auf dieselbe Adresse hintereinander ein - die Parallelität ginge verloren.
+        var res = await fetch(cfg.url, { headers: headers, cache: 'no-store' });
+        stats.requests++;
+        if (res.status === 206 || res.status === 200) {
+          var u8 = new Uint8Array(await res.arrayBuffer());
+          if (res.status === 200 && u8.length > end - start) u8 = u8.subarray(start, end);
+          stats.bytes += u8.length;
+          return _bytesToBinaryString_(u8);
+        }
+        throw _driveError_(res.status);
+      } catch (err) {
+        if (err.fatal || attempt >= BROWSER_RETRIES) throw err;
+        stats.retries++;
+        await _sleep_(400 * Math.pow(2, attempt) + Math.floor(Math.random() * 250));
+      }
+    }
+  }
+
+  // Viele Bereiche parallel; Ergebnis in der Reihenfolge der Bereiche.
+  // report(fertig, gesamt) wird gelegentlich aufgerufen.
+  async function readManyAsync(ranges, report) {
+    var out = new Array(ranges.length), next = 0, done = 0, failed = false, lastReport = 0;
+    async function lane() {
+      while (!failed && next < ranges.length) {
+        var i = next++;
+        try { out[i] = await fetchRange(ranges[i][0], ranges[i][1]); }
+        catch (err) { failed = true; throw err; }
+        done++;
+        if (report && (done === ranges.length || Date.now() - lastReport > 200)) { lastReport = Date.now(); report(done, ranges.length); }
+      }
+    }
+    var lanes = [];
+    for (var k = 0; k < Math.min(BROWSER_PARALLEL, ranges.length); k++) lanes.push(lane());
+    await Promise.all(lanes);
+    return out;
+  }
+
   return {
     size: cfg.size,
     stats: stats,
     read: read,
-    readMany: function(ranges) { return ranges.map(function(r) { return read(r[0], r[1]); }); }
+    readMany: function(ranges) { return ranges.map(function(r) { return read(r[0], r[1]); }); },
+    readManyAsync: readManyAsync
   };
 }
 
+/**
+ * pdfRebuild_ (PdfShrink.js) mit parallelem Lesen: gleiche Schritte, gleiche
+ * Funktionen, nur dass die Bereiche per readManyAsync kommen.
+ */
+async function pdfRebuildAsync_(reader, opts, report) {
+  opts = opts || {};
+  var budget = opts.imageBudget === undefined ? Infinity : opts.imageBudget;
+  var plan = _pdfShrinkPlan_(reader);
+  var texts = await reader.readManyAsync(plan.ranges.map(function(r) { return [r[0], r[1]]; }), function(d, t) { if (report) report(0, d, t); });
+  var st = _pdfRebuildClassify_(plan, texts, budget);
+  texts = null;
+  var full = _pdfShrinkFullRanges_(st.fullNeeded);
+  var parts = full.ranges.length ? await reader.readManyAsync(full.ranges, function(d, t) { if (report) report(1, d, t); }) : [];
+  return _pdfRebuildFinish_(st, full, parts);
+}
+
 // ─── Zustand und Befehle ──────────────────────────────────────────────────
-var S = { reader: null, an: null, cfg: null };
+var S = { reader: null, an: null, cfg: null, parts: [] };
 
 function post_(msg, transfer) { self.postMessage(msg, transfer || []); }
 
-function cmdOpen_(m) {
+async function cmdOpen_(m) {
   var t0 = Date.now();
   S.cfg = { url: m.url, token: m.token, size: m.size, block: m.block };
   S.reader = makeRangeReader_(S.cfg);
-  S.an = _driveAnnotatedAnalyze_(S.reader);
+  try {
+    var model = await pdfRebuildAsync_(S.reader, { imageBudget: 0 }, function(step, done, total) {
+      post_({ id: m.id, progress: { phase: 'read', step: step, done: done, total: total } });
+    });
+    S.an = _driveAnnotatedOpen_(model);
+  } catch (err) {
+    throw _driveAnnotatedStructureError_(err);
+  }
   var text = S.an.model.text;
   return {
-    pages: S.an.pages.length, encrypted: !!S.an.model.encrypted,
-    imagesRemoved: S.an.model.imagesRemoved, imagesKept: S.an.model.imagesKept,
-    shrunkBytes: text.length, shrunkHash: _fnv_(text),
-    requests: S.reader.stats.requests, downloadedBytes: S.reader.stats.bytes, retries: S.reader.stats.retries,
-    ms: Date.now() - t0
+    result: {
+      pages: S.an.pages.length, encrypted: !!S.an.model.encrypted,
+      imagesRemoved: S.an.model.imagesRemoved, imagesKept: S.an.model.imagesKept,
+      shrunkBytes: text.length, shrunkHash: _fnv_(text),
+      requests: S.reader.stats.requests, downloadedBytes: S.reader.stats.bytes, retries: S.reader.stats.retries,
+      ms: Date.now() - t0
+    }
   };
 }
 
@@ -169,10 +249,12 @@ function cmdAnnotate_(m) {
 // Bereitet die Prüfpakete vor (wie _drivePdfPrepUnit_ in Apps Script): Bilder bis
 // zum Budget behalten, Seiten in Pakete teilen. Pakete bleiben im Worker; über
 // "part" wird eines abgeholt.
-function cmdSplit_(m) {
+async function cmdSplit_(m) {
   var t0 = Date.now();
   var reader = S.reader || makeRangeReader_(m);
-  var model = pdfRebuild_(reader, { imageBudget: m.imageBudget === undefined ? 12 * 1024 * 1024 : m.imageBudget });
+  var model = await pdfRebuildAsync_(reader, { imageBudget: m.imageBudget === undefined ? 12 * 1024 * 1024 : m.imageBudget }, function(step, done, total) {
+    post_({ id: m.id, progress: { phase: 'read', step: step, done: done, total: total } });
+  });
   var splitter = pdfPageSplitter_({ text: model.text, offsets: model.offsets, compressed: model.compressed,
                                     rootNum: model.rootNum, maxNum: model.maxNum, encrypted: model.encrypted });
   var n = splitter.pageCount, per = m.pagesPerPart || 4, sizes = [];
@@ -192,12 +274,12 @@ function cmdPart_(m) {
   return { result: { bytes: u8.length }, transfer: [u8.buffer], part: u8 };
 }
 
-self.onmessage = function(ev) {
+self.onmessage = async function(ev) {
   var m = ev.data, out;
   try {
-    if (m.cmd === 'open') out = { result: cmdOpen_(m) };
+    if (m.cmd === 'open') out = await cmdOpen_(m);
     else if (m.cmd === 'annotate') out = cmdAnnotate_(m);
-    else if (m.cmd === 'split') out = cmdSplit_(m);
+    else if (m.cmd === 'split') out = await cmdSplit_(m);
     else if (m.cmd === 'part') out = cmdPart_(m);
     else throw new Error('Unknown command: ' + m.cmd);
   } catch (err) {

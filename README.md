@@ -119,9 +119,15 @@ die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script.
   Modul `node tools/build-pdf-worker.cjs` ausführen und `PdfWorkerSource.html` mit einchecken.
 - **Noch nicht angeschlossen:** die Prüfung mit Gemini (Pakete vorbereiten kann der Worker schon, `split`).
 
-Gemessen (Chromium, simuliertes Drive mit 100 ms Verzögerung je Anfrage): 205 MB mit 300 Seiten öffnen in ca. 4 s,
-3000 Seiten in ca. 3 s; 150 Funde in 3000 Seiten suchen in ca. 13 s. Das Ergebnis ist Byte für Byte gleich wie mit den
-Apps-Script-Modulen und öffnet in pypdf.
+Gemessen (Chromium, simuliertes Drive mit 100 ms Verzögerung je Anfrage): Eine PDF mit 205 MB und 300 Seiten
+öffnet in ca. 5 s und liest dabei nur ca. 2 MB, weil die Bilder nur angelesen werden (die Struktur kommt in
+kleinen Blöcken, die Objekte als parallele Range-Anfragen). 3000 Seiten (122 MB, kleine Bilder) öffnen in ca. 1,5 s;
+150 Funde in 3000 Seiten suchen in ca. 12 s. Das Ergebnis ist Byte für Byte gleich wie mit den Apps-Script-Modulen und
+öffnet in pypdf. Gegenmessung in der echten Umgebung (CBR-Handbuch, 215 MB, 462 Seiten): Die erste Fassung las
+die ganze Datei in 8-MB-Blöcken und brauchte 55 s; deshalb liest der Worker jetzt nur noch die nötigen Bereiche.
+
+Wichtig bei parallelen Anfragen: `fetch(..., { cache: 'no-store' })`. Alle Bereiche haben dieselbe Adresse, der
+HTTP-Cache des Browsers reiht Anfragen auf dieselbe Adresse sonst hintereinander ein.
 
 Nicht in der echten Umgebung geprüft (Testseite zeigt es): Worker aus Blob-URL im Apps-Script-Frame,
 CORS-Anfrage mit Token an `www.googleapis.com`, Dateidownload aus dem Frame. Das Token hält Drive-Zugriff ca. eine
