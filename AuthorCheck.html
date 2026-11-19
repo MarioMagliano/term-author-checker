@@ -1631,7 +1631,7 @@ function exportRulesToDrive() {
 // Regeldatei wieder; Standardregeln kommen aus Rules.gs).
 function isCustomRule(r) { return !!(r && typeof r.Name === 'string' && r.Name.indexOf('CUSTOM_') === 0); }
 
-var RULE_TYPES = ['Style', 'Grammar', 'Spelling', 'Terminology', 'Abbreviation'];
+var RULE_TYPES = ['Style', 'Grammar', 'Spelling', 'Terminology', 'Abbreviation', 'Norm'];
 
 // Eine importierte Regel übernehmen:
 //  - Name einer vorhandenen STANDARDregel: nur an/aus, Wert und Kategorie
