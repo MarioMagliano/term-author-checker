@@ -15,7 +15,7 @@
 // ============================================================================
 
 var DOC_PROMPT_SCOPE = 'DOCUMENT';
-var DOC_PROMPT_MAX = 5; // so viele Gesamtdokument-Prompts pro Pruefung (parallel)
+var DOC_PROMPT_MAX = 5; // so viele Gesamtdokument-Prompts pro Pruefung (parallel); Standard, siehe _docPromptMax_
 // Groesste PDF, die einem Gesamtdokument-Prompt direkt beiliegt. Gemini nimmt
 // hoechstens 20 MB pro Anfrage, Base64 macht aus 13 MB ~17,3 MB, dazu kommt der
 // Prompt (bis 50.000 Zeichen). Frueher galt hier dieselbe Grenze wie fuer die
@@ -29,6 +29,14 @@ var DOC_PROMPT_PDF_MAX_BYTES = 13 * 1024 * 1024;
 // So viel Text aus den uebrigen eigenen Regeln (z. B. importierter
 // Redaktionsleitfaden) geht als Referenz mit.
 var DOC_PROMPT_GUIDE_MAX_CHARS = 30000;
+
+// So viele Gesamtdokument-Prompts laufen je Pruefung: Skripteigenschaft DOC_PROMPT_MAX
+// (1 bis 12), sonst DOC_PROMPT_MAX. Mehr Prompts bedeuten mehr gleichzeitige Anfragen
+// mit dem ganzen Dokument; das Ergebnis kommt erst, wenn der langsamste fertig ist.
+function _docPromptMax_() {
+  var n = parseInt(PropertiesService.getScriptProperties().getProperty('DOC_PROMPT_MAX') || '', 10);
+  return n > 0 ? Math.min(n, 12) : DOC_PROMPT_MAX;
+}
 
 function _docPromptPdfMaxBytes_() {
   var mb = parseFloat(PropertiesService.getScriptProperties().getProperty('DOC_PROMPT_PDF_MAX_MB') || '');
@@ -44,7 +52,7 @@ function _isDocScopePrompt_(r) {
 function _docPromptsFromRules_(rules) {
   var guide = _docPromptGuide_(rules);
   return (rules || []).filter(function(r) { return r.IsEnabled && _isDocScopePrompt_(r); })
-    .slice(0, DOC_PROMPT_MAX)
+    .slice(0, _docPromptMax_())
     .map(function(r) {
       return { name: r.Name, title: String(r.Description || r.Name || 'Prompt'), prompt: String(r.CustomPrompt || r.Description || ''), guide: guide };
     });
@@ -88,9 +96,10 @@ function _docPromptNotes_(lang, rules) {
     return notes;
   }
   var active = mine.filter(function(r) { return r.IsEnabled && _isDocScopePrompt_(r); });
-  if (active.length > DOC_PROMPT_MAX) {
-    notes.push(_ct_('d.docNoteMax', { n: active.length, max: DOC_PROMPT_MAX,
-      names: active.slice(DOC_PROMPT_MAX).map(function(r) { return r.Description || r.Name; }).join(', ') }));
+  var maxPrompts = _docPromptMax_();
+  if (active.length > maxPrompts) {
+    notes.push(_ct_('d.docNoteMax', { n: active.length, max: maxPrompts,
+      names: active.slice(maxPrompts).map(function(r) { return r.Description || r.Name; }).join(', ') }));
   }
   mine.forEach(function(r) {
     if (!r.IsEnabled && _isDocScopePrompt_(r)) notes.push(_ct_('d.docNoteDisabled', { name: r.Description || r.Name }));

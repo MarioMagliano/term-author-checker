@@ -79,6 +79,10 @@ function apiPdfBrowserPrepare(fileInput, language) {
   info.language = lang;
   info.languageName = _drivePdfLanguageName_(lang);
   info.docPromptTitles = docPrompts.map(function(dp) { return dp.title; });
+  // Aktive Gesamtdokument-Prompts ueber der Grenze laufen nicht; die Seite sagt das, statt sie still wegzulassen.
+  info.docPromptMax = _docPromptMax_();
+  info.docPromptsSkipped = rules.filter(function(r) { return r.IsEnabled && _isDocScopePrompt_(r); })
+    .slice(info.docPromptMax).map(function(r) { return String(r.Description || r.Name || 'Prompt'); });
   info.maxBytes = DRIVE_PDF_MAX_BYTES;
   info.docMaxBytes = _docPromptPdfMaxBytes_();
   return info;

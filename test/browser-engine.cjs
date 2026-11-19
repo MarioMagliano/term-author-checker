@@ -282,7 +282,7 @@ async function main() {
       if (name === 'apiPdfBrowserPrepare') {
         srvLog.prepare++; srvLog.languages.push(args[1]);
         return { fileId: FILE_ID, name: 'Handbuch <b>1</b>.pdf', size: pdf.length, token: TOKEN, labels: { 'type.grammar': 'Grammar' },
-                 language: args[1], languageName: 'German', docPromptTitles: GEMS, docMaxBytes: 50 * 1024 * 1024, maxBytes: 15 * 1024 * 1024 };
+                 language: args[1], languageName: 'German', docPromptTitles: GEMS, docPromptMax: 5, docPromptsSkipped: ['Gem D', 'Gem E'], docMaxBytes: 50 * 1024 * 1024, maxBytes: 15 * 1024 * 1024 };
       }
       if (name === 'apiPdfBrowserCheckPart') {
         const b64 = args[0], meta = args[1];
@@ -339,8 +339,9 @@ async function main() {
     check('page: page text of the whole document reaches the server', srvLog.doc[1].texts === pageCount && srvLog.doc[1].firstPageHasMarker && srvLog.doc[1].pages === pageCount && srvLog.doc[1].sizeBytes > 0);
     check('page: the report of the prompts is created and linked', srvLog.docReport && JSON.stringify(srvLog.docReport.titles) === JSON.stringify([GEMS[0], GEMS[1]]) &&
       srvLog.docReport.noIssues && (await ui.$eval('#docReportLink', function(a) { return a.href; })) === 'https://doc.test/report', JSON.stringify(srvLog.docReport));
-    check('page: only real problems are shown as messages (no hints about disabled or unsupported prompts)',
+    check('page: only real problems are shown (a prompt that failed, prompts left out because of the limit), no other hints',
       notes.indexOf('Gem C') !== -1 && notes.indexOf('fehlgeschlagen') !== -1 && notes.indexOf('Gem A') === -1 && notes.indexOf('Gem B') === -1 &&
+      notes.indexOf('Gem D, Gem E') !== -1 && notes.indexOf('höchstens 5') !== -1 && notes.indexOf('DOC_PROMPT_MAX') !== -1 &&
       notes.indexOf('laufen im Browser-Weg') === -1 && notes.indexOf('ausgeschaltet') === -1, notes);
     check('page: every part sent to the check as its own PDF', srvLog.parts.length > 0 && srvLog.parts.every(function(x) { return x.pdf; }) &&
       srvLog.parts.filter(function(x) { return x.to - x.from === refParts.per || x.to === refParts.n; }).length >= nParts, srvLog.parts.length + ' calls for ' + nParts + ' parts');

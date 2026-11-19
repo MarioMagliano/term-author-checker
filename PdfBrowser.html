@@ -153,6 +153,10 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     try { info = await server('apiPdfBrowserPrepare', el('file').value, el('lang').value); done(s, mb(info.size), info.name); }
     catch (e) { fail(s, e); return false; }
     bar(5);
+    if (info.docPromptsSkipped && info.docPromptsSkipped.length) {
+      note(info.docPromptsSkipped.length + ' Gesamtdokument-Prompt(s) laufen nicht, weil höchstens ' + info.docPromptMax + ' gleichzeitig laufen: ' +
+        info.docPromptsSkipped.join(', ') + '. Schalte andere Prompts aus oder erhöhe die Skripteigenschaft DOC_PROMPT_MAX (bis 12).');
+    }
     s = step('Worker im Browser starten');
     try { pdf = PdfBrowser.create(); done(s, 'ok'); } catch (e) { fail(s, e); return false; }
 

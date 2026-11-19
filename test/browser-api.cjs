@@ -77,6 +77,7 @@ const DOC_RULES = [
   { name: 'CUSTOM_GEM_2', title: 'Gem 2: Daten', prompt: 'PROMPT-TWO', guide: '' },
   { name: 'CUSTOM_GEM_3', title: 'Gem 3: Werkzeuge', prompt: 'PROMPT-THREE', guide: '' }
 ];
+const realDocPromptsFromRules = ctx._docPromptsFromRules_;
 ctx._docPromptsFromRules_ = function() { return DOC_RULES; };
 
 const b64 = Buffer.from('%PDF-1.4 test').toString('base64');
@@ -105,6 +106,28 @@ err = '';
 try { ctx.apiPdfBrowserPrepare(link, 'de'); } catch (e) { err = e.message; }
 check('prepare: missing Gemini key is reported early', /Gemini API Key missing/.test(err), err);
 props.GEMINI_API_KEY = 'k';
+
+// ── Grenze fuer Gesamtdokument-Prompts (DOC_PROMPT_MAX) ─────────────────────────────
+const docRule = function(n, on) { return { Name: 'CUSTOM_G' + n, Description: 'Gem ' + n, RuleKind: 'PROMPT', PromptScope: 'DOCUMENT', CustomPrompt: 'p' + n, IsEnabled: on !== false }; };
+const manyRules = [1, 2, 3, 4, 5, 6, 7].map(function(n) { return docRule(n); }).concat([docRule(8, false)]);
+const titlesOf = function(list) { return list.map(function(p) { return p.title; }).join(','); };
+check('limit: five whole-document prompts by default, the rest is left out', titlesOf(realDocPromptsFromRules(manyRules)) === 'Gem 1,Gem 2,Gem 3,Gem 4,Gem 5');
+props.DOC_PROMPT_MAX = '8';
+check('limit: DOC_PROMPT_MAX raises it, switched-off prompts never run', titlesOf(realDocPromptsFromRules(manyRules)) === 'Gem 1,Gem 2,Gem 3,Gem 4,Gem 5,Gem 6,Gem 7');
+props.DOC_PROMPT_MAX = '99';
+check('limit: at most 12', ctx._docPromptMax_() === 12);
+['abc', '0', '-3', ''].forEach(function(v) { props.DOC_PROMPT_MAX = v; });
+check('limit: invalid values fall back to 5', (function() { return ['abc', '0', '-3', ''].every(function(v) { props.DOC_PROMPT_MAX = v; return ctx._docPromptMax_() === 5; }); })());
+delete props.DOC_PROMPT_MAX;
+const origRulesFn = ctx.apiGetRulesConfig;
+ctx.apiGetRulesConfig = function() { return manyRules; };
+let lim = ctx.apiPdfBrowserPrepare(link, 'de');
+check('prepare: prompts over the limit are reported, not dropped silently', lim.docPromptMax === 5 && JSON.stringify(lim.docPromptsSkipped) === JSON.stringify(['Gem 6', 'Gem 7']), JSON.stringify(lim.docPromptsSkipped));
+props.DOC_PROMPT_MAX = '7';
+lim = ctx.apiPdfBrowserPrepare(link, 'de');
+check('prepare: nothing is left out when the limit is high enough', lim.docPromptMax === 7 && lim.docPromptsSkipped.length === 0);
+delete props.DOC_PROMPT_MAX;
+ctx.apiGetRulesConfig = origRulesFn;
 
 // ── apiPdfBrowserCheckPart ───────────────────────────────────────────────────
 gemini.answer = okAnswer([{ type: 'grammar', location: 'Page 9', original: 'abc', suggestion: 'abd', explanation: 'x' }, { type: 'style', original: '', suggestion: 'dropped' }]);

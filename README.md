@@ -128,6 +128,7 @@ Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prom
 - **Eine Anmerkung je Fund:** Ein gefundener Text bekommt eine gelbe Markierung, die den Kommentar selbst trägt (ein Eintrag im Kommentarfeld von Acrobat). Nur wenn die Stelle nicht gefunden wird, gibt es stattdessen eine Notiz oben links auf der Seite. Das gilt für das Browser-Fenster und für das Drive-Add-on.
 - **Filter:** Die Kategorien im Ergebnis (Terminologie, Grammatik, Rechtschreibung, Stil und je ein Chip pro Gesamtdokument-Prompt) sind Schalter. Liste, kommentierte PDF und Sheet nutzen nur die eingeschalteten; die Zahl steht in den Knöpfen.
 - **Meldungen:** Hinweise zu ausgeschalteten Prompts erscheinen nicht. Gezeigt werden nur echte Probleme (ein Prompt ist fehlgeschlagen, Seiten ohne Ergebnis).
+- **Anzahl Gesamtdokument-Prompts:** Je Prüfung laufen höchstens 5 (Standard). Die Skripteigenschaft `DOC_PROMPT_MAX` (1 bis 12) ändert das. Prompts über der Grenze laufen nicht; die Seite nennt sie mit Namen, statt sie still wegzulassen. Jeder Prompt ist eine eigene Anfrage mit dem ganzen Dokument und läuft parallel zu den anderen.
 - **Prompt-Cache:** Der Prompt wird 5 Minuten je Sprache zwischengespeichert (`CacheService`); Regeländerungen
   greifen danach.
 
