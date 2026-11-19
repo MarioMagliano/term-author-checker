@@ -369,7 +369,7 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   // Ohne Gesamtdokument-Bericht bricht ein komplett fehlgeschlagener Lauf ab;
   // mit Bericht wird der Bericht trotzdem geliefert.
   var docNotes = promptParts.docNotes || [];
-  var reports = docReports.length ? _finishDocPromptReports_(docCtx.fileName, docReports, 'reports', docNotes)
+  var reports = docReports.length ? _finishDocPromptReports_(docCtx.fileName, docReports, 'reports', docNotes, { language: lang, pageChecks: _docReportPageChecks_(issues) })
     : (docNotes.length ? { url: '', items: [], notes: docNotes } : null);
   var promptIssues = _docPromptAllIssues_(docReports);
   if (failedParts === responses.length && !(reports && reports.url) && !promptIssues.length) throw firstError;

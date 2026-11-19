@@ -54,6 +54,7 @@ function apiPdfBrowserInit(fileInput) {
   if (file.getMimeType() !== 'application/pdf') throw new Error('This file is not a PDF.');
   var labels = {};
   ['grammar', 'terminology', 'style', 'prompt'].forEach(function(t) { labels['type.' + t] = _ct_('type.' + t); });
+  ['ann.severity', 'ann.evidence'].forEach(function(k) { labels[k] = _ct_(k); }); // Beschriftung der Kommentare in der PDF
   return { fileId: id, name: file.getName(), size: file.getSize(), token: ScriptApp.getOAuthToken(), labels: labels };
 }
 
@@ -169,16 +170,34 @@ function apiPdfBrowserDocPrompts(req) {
 }
 
 /**
- * Bericht der Gesamtdokument-Prompts als Google Doc (wie im Add-on). reports: die
- * Berichte aus apiPdfBrowserDocPrompts. Liefert { url, items, error }.
+ * Bericht der Gesamtdokument-Prompts als Google Doc (wie im Add-on): Titel wie das geprüfte
+ * Dokument, Zusammenfassung, Checkliste nach Schwere, umfassende Erklärung. reports: die Berichte
+ * aus apiPdfBrowserDocPrompts (mit ihren Funden), meta: { language, pages, mode, pageChecks }.
+ * Liefert { url, items, error }.
  */
-function apiPdfBrowserDocReport(fileName, reports) {
+function apiPdfBrowserDocReport(fileName, reports, meta) {
   var cut = function(v, n) { return String(v === undefined || v === null ? '' : v).slice(0, n); };
   var clean = (Array.isArray(reports) ? reports : []).slice(0, 20).map(function(r) {
-    return { title: cut(r && r.title, 200), markdown: cut(r && r.markdown, 400000), error: cut(r && r.error, 500),
-             note: cut(r && r.note, 400), truncated: !!(r && r.truncated), issues: [] };
+    return {
+      title: cut(r && r.title, 200), markdown: cut(r && r.markdown, 400000), error: cut(r && r.error, 500),
+      note: cut(r && r.note, 400), truncated: !!(r && r.truncated),
+      issues: (r && Array.isArray(r.issues) ? r.issues : []).slice(0, 300).map(function(i) {
+        return { type: 'prompt', rule: cut(i.rule, 200), location: cut(i.location, 200), original: cut(i.original, 2000),
+                 suggestion: cut(i.suggestion, 2000), explanation: cut(i.explanation, 4000),
+                 severity: _docSeverity_(i.severity, i.explanation), evidence: cut(i.evidence, 2000) };
+      })
+    };
   });
-  return _finishDocPromptReports_(cut(fileName, 200) || 'PDF', clean, 'pdfs', []);
+  meta = meta || {};
+  var safeMeta = {
+    language: DRIVE_PDF_LANGUAGES.some(function(pair) { return pair[0] === meta.language; }) ? meta.language : 'de',
+    pages: Math.max(0, Math.min(100000, parseInt(meta.pages, 10) || 0)),
+    mode: ['pdf', 'text', 'mixed'].indexOf(meta.mode) !== -1 ? meta.mode : '',
+    pageChecks: (Array.isArray(meta.pageChecks) ? meta.pageChecks : []).slice(0, 12).map(function(p) {
+      return { label: cut(p && p.label, 60), n: Math.max(0, parseInt(p && p.n, 10) || 0) };
+    })
+  };
+  return _finishDocPromptReports_(cut(fileName, 200) || 'PDF', clean, 'pdfs', [], safeMeta);
 }
 
 // Beim Weiterreichen an Apps-Script-Funktionen nur bekannte Felder und begrenzte Längen.

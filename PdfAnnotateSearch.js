@@ -124,6 +124,8 @@ function _drivePdfComputeAnnotations_(doc, pages, issues, deadline, opts) {
     var typeLabel = (type === 'prompt' && issue.rule ? issue.rule : _ct_('type.' + type)).toUpperCase();
     var contents = '[' + typeLabel + ']\n' + issue.original + '\n\n-> ' + issue.suggestion +
       (issue.explanation ? '\n\n' + issue.explanation : '') +
+      (issue.evidence ? '\n\n' + _ct_('ann.evidence') + ': ' + issue.evidence : '') +
+      (issue.severity ? '\n\n' + _ct_('ann.severity') + ': ' + issue.severity : '') +
       (issue.location ? '\n\n(AI-reported location: ' + issue.location + ')' : '');
     var ann = { contents: contents, title: 'Author Check (' + typeLabel + ')' };
 

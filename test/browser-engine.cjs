@@ -303,7 +303,7 @@ async function main() {
         });
         return { indexes: req.indexes, reports: reports };
       }
-      if (name === 'apiPdfBrowserDocReport') { srvLog.docReport = { file: args[0], titles: args[1].map(function(r) { return r.title; }), noIssues: args[1].every(function(r) { return !('issues' in r); }) }; return { url: 'https://doc.test/report', items: [] }; }
+      if (name === 'apiPdfBrowserDocReport') { srvLog.docReport = { file: args[0], titles: args[1].map(function(r) { return r.title; }), errors: args[1].map(function(r) { return !!r.error; }), issues: args[1].map(function(r) { return (r.issues || []).length; }), meta: args[2] }; return { url: 'https://doc.test/report', items: [] }; }
       if (name === 'apiPdfBrowserLogRun') { srvLog.logged = args; return true; }
       if (name === 'apiPdfBrowserExportSheet') { srvLog.sheetIssues = args[0].length; return 'https://sheet.test/report'; }
       throw new Error('unexpected call ' + name);
@@ -337,8 +337,10 @@ async function main() {
       srvLog.doc.length === 2 && srvLog.doc[0].mode === 'pdf' && JSON.stringify(srvLog.doc[0].indexes) === '[0,1,2]' && srvLog.doc[0].pdf &&
       srvLog.doc[1].mode === 'text' && JSON.stringify(srvLog.doc[1].indexes) === '[1,2]', JSON.stringify(srvLog.doc.map(function(d) { return d.mode + ':' + d.indexes; })));
     check('page: page text of the whole document reaches the server', srvLog.doc[1].texts === pageCount && srvLog.doc[1].firstPageHasMarker && srvLog.doc[1].pages === pageCount && srvLog.doc[1].sizeBytes > 0);
-    check('page: the report of the prompts is created and linked', srvLog.docReport && JSON.stringify(srvLog.docReport.titles) === JSON.stringify([GEMS[0], GEMS[1]]) &&
-      srvLog.docReport.noIssues && (await ui.$eval('#docReportLink', function(a) { return a.href; })) === 'https://doc.test/report', JSON.stringify(srvLog.docReport));
+    check('page: the report of the prompts is created and linked', srvLog.docReport && JSON.stringify(srvLog.docReport.titles) === JSON.stringify([GEMS[0], GEMS[1], GEMS[2]]) &&
+      JSON.stringify(srvLog.docReport.errors) === '[false,false,true]' && JSON.stringify(srvLog.docReport.issues) === '[2,1,0]' &&
+      srvLog.docReport.meta && srvLog.docReport.meta.language === 'de' && srvLog.docReport.meta.pages > 0 && ['pdf', 'text', 'mixed'].indexOf(srvLog.docReport.meta.mode) !== -1 &&
+      Array.isArray(srvLog.docReport.meta.pageChecks) && (await ui.$eval('#docReportLink', function(a) { return a.href; })) === 'https://doc.test/report', JSON.stringify(srvLog.docReport));
     check('page: only real problems are shown (a prompt that failed, prompts left out because of the limit), no other hints',
       notes.indexOf('Gem C') !== -1 && notes.indexOf('fehlgeschlagen') !== -1 && notes.indexOf('Gem A') === -1 && notes.indexOf('Gem B') === -1 &&
       notes.indexOf('Gem D, Gem E') !== -1 && notes.indexOf('höchstens 5') !== -1 && notes.indexOf('DOC_PROMPT_MAX') !== -1 &&

@@ -204,12 +204,22 @@ gemini.fn = null;
 
 // ── apiPdfBrowserDocReport ──────────────────────────────────────────────────────
 const built = [];
-ctx._buildDocPromptReport_ = function(fileName, reports, folderKey) { built.push({ fileName: fileName, reports: reports, folderKey: folderKey }); return 'https://doc.example/report'; };
-const rep1 = ctx.apiPdfBrowserDocReport('Handbuch.pdf', [{ title: 'Gem 1', markdown: '# ok', note: 'n', truncated: true, issues: [{ original: 'x' }], evil: 1 }, { title: 'Gem 2', error: 'boom' }, { title: 'T'.repeat(500), markdown: 'm'.repeat(500000) }]);
+ctx._buildDocPromptReport_ = function(fileName, reports, folderKey, meta) { built.push({ fileName: fileName, reports: reports, folderKey: folderKey, meta: meta }); return 'https://doc.example/report'; };
+const rep1 = ctx.apiPdfBrowserDocReport('Handbuch.pdf', [{ title: 'Gem 1', markdown: '# ok', note: 'n', truncated: true, issues: [{ original: 'x', severity: 'critical', evidence: 'Seite 3', evil: 1 }], evil: 1 }, { title: 'Gem 2', error: 'boom' }, { title: 'T'.repeat(500), markdown: 'm'.repeat(500000) }]);
 check('doc report: Google Doc is created from the reports and the link comes back', rep1.url === 'https://doc.example/report' && built.length === 1 && built[0].folderKey === 'pdfs' && built[0].fileName === 'Handbuch.pdf', JSON.stringify(rep1).slice(0, 100));
-check('doc report: only known fields, limited length, no findings forwarded',
-  built[0].reports.length === 3 && !('evil' in built[0].reports[0]) && built[0].reports[0].issues.length === 0 && built[0].reports[0].truncated === true &&
-  built[0].reports[2].title.length === 200 && built[0].reports[2].markdown.length === 400000);
+check('doc report: only known fields, limited length, findings kept with severity and evidence',
+  built[0].reports.length === 3 && !('evil' in built[0].reports[0]) && built[0].reports[0].truncated === true &&
+  built[0].reports[2].title.length === 200 && built[0].reports[2].markdown.length === 400000 &&
+  built[0].reports[0].issues.length === 1 && built[0].reports[0].issues[0].severity === 'kritisch' && built[0].reports[0].issues[0].evidence === 'Seite 3' &&
+  built[0].reports[0].issues[0].type === 'prompt' && !('evil' in built[0].reports[0].issues[0]) && built[0].reports[2].issues.length === 0);
+built.length = 0;
+ctx.apiPdfBrowserDocReport('Handbuch.pdf', [{ title: 'G', markdown: 'm' }], { language: 'en', pages: 462.7, mode: 'mixed', pageChecks: [{ label: 'Grammar', n: 3 }, { label: 'x'.repeat(200), n: -4 }, null], evil: 1 });
+check('doc report: header data is sanitized (language, pages, mode, numbers per check)',
+  built[0].meta.language === 'en' && built[0].meta.pages === 462 && built[0].meta.mode === 'mixed' && built[0].meta.pageChecks.length === 3 &&
+  built[0].meta.pageChecks[0].n === 3 && built[0].meta.pageChecks[1].label.length === 60 && built[0].meta.pageChecks[1].n === 0 && !('evil' in built[0].meta), JSON.stringify(built[0].meta));
+built.length = 0;
+ctx.apiPdfBrowserDocReport('Handbuch.pdf', [{ title: 'G', markdown: 'm' }], { language: 'xx', pages: 'abc', mode: 'weird' });
+check('doc report: unknown language -> German, nonsense pages/mode are ignored', built[0].meta.language === 'de' && built[0].meta.pages === 0 && built[0].meta.mode === '', JSON.stringify(built[0].meta));
 check('doc report: nothing to report -> no document', (function() { built.length = 0; const r = ctx.apiPdfBrowserDocReport('x.pdf', []); return r.url === '' && built.length === 0; })());
 audit.length = 0;
 

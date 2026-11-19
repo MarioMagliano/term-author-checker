@@ -477,7 +477,10 @@ function _drivePdfWork_(job, parts, started, lim, loadBatch) {
       return { done: false };
     }
   }
-  var docResult = job.docReports ? _finishDocPromptReports_(job.fileName, job.docReports, 'pdfs', job.docNotes)
+  var docResult = job.docReports ? _finishDocPromptReports_(job.fileName, job.docReports, 'pdfs', job.docNotes, {
+    language: job.language, pages: parts.length ? parts[parts.length - 1].to : 0,
+    mode: _docReportMode_(job.docReports), pageChecks: _docReportPageChecks_(job.issues)
+  })
     : (job.docNotes && job.docNotes.length ? { url: '', items: [], notes: job.docNotes } : null);
   // Befunde der Gesamtdokument-Prompts in die normale Liste: so landen sie auch in
   // der kommentierten PDF und im Sheet.

@@ -95,7 +95,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   var IMAGE_BUDGET = 12 * 1024 * 1024;   // wie DRIVE_PDF_IMAGE_BUDGET: so viele Bildbytes bleiben bei großen PDFs
 
   var pdf = null, info = null, opened = null, issues = [], failed = [], steps = [];
-  var seen = {}, docReportUrl = '', activeCats = {}, catOrder = [], catCounts = {}, resultMeta = null;
+  var seen = {}, docReportUrl = '', docRun = null, activeCats = {}, catOrder = [], catCounts = {}, resultMeta = null;
   var TYPE_LABELS = { terminology: 'Terminologie', grammar: 'Grammatik', spelling: 'Rechtschreibung', style: 'Stil', prompt: 'Prompt' };
   var el = function(id) { return document.getElementById(id); };
 
@@ -137,7 +137,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     if (!on) updateButtons();
   }
   function reset() {
-    steps = []; issues = []; failed = []; opened = null; seen = {}; docReportUrl = ''; activeCats = {}; catOrder = []; catCounts = {}; resultMeta = null; render();
+    steps = []; issues = []; failed = []; opened = null; seen = {}; docReportUrl = ''; docRun = null; activeCats = {}; catOrder = []; catCounts = {}; resultMeta = null; render();
     el('docReport').innerHTML = '';
     el('msg').textContent = ''; el('msg').className = 'msg'; el('notes').innerHTML = '';
     el('resBox').style.display = 'none'; el('diagBox').style.display = 'none';
@@ -220,11 +220,8 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
         bad = badOnes();
       }
       reports.forEach(function(r) { if (r && !r.error) addIssues(r.issues); });
-      var withReport = reports.filter(function(r) { return r && r.markdown; })
-        .map(function(r) { return { title: r.title, markdown: r.markdown, note: r.note || '', truncated: !!r.truncated }; });
-      if (withReport.length) {
-        try { docReportUrl = (await server('apiPdfBrowserDocReport', info.name, withReport)).url || ''; } catch (e) { /* der Bericht ist nicht kritisch */ }
-      }
+      // Der Bericht (Google Doc) entsteht am Ende des Laufs, wenn auch die Zahlen der Seitenprüfung feststehen.
+      docRun = { reports: reports.map(function(r, i) { return r || { title: titles[i], error: 'keine Antwort' }; }) };
       bad.forEach(function(i) {
         note('Gesamtdokument-Prompt „' + titles[i] + '" ist fehlgeschlagen: ' + String((reports[i] && reports[i].error) || 'keine Antwort').replace(/[.\s]+$/, '') + '.');
       });
@@ -338,12 +335,13 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     tb.innerHTML = '<tr><th>Typ</th><th>Stelle</th><th>Original → Vorschlag</th></tr>';
     list.slice(0, 300).forEach(function(i) {
       var tr = document.createElement('tr'), t = document.createElement('td'), l = document.createElement('td'), c = document.createElement('td');
-      t.className = 't'; t.textContent = catLabel(catOf(i));
+      t.className = 't'; t.textContent = catLabel(catOf(i)) + (i.severity ? ' · ' + i.severity : '');
       l.className = 'loc'; l.textContent = i.location || '';
       var del = document.createElement('del'), ins = document.createElement('ins');
       del.textContent = i.original; ins.textContent = i.suggestion;
       c.appendChild(del); c.appendChild(document.createTextNode(' → ')); c.appendChild(ins);
       if (i.explanation) { var ex = document.createElement('div'); ex.className = 'loc'; ex.textContent = i.explanation; c.appendChild(ex); }
+      if (i.evidence) { var ev = document.createElement('div'); ev.className = 'loc'; ev.textContent = 'Beleg: ' + i.evidence; c.appendChild(ev); }
       tr.appendChild(t); tr.appendChild(l); tr.appendChild(c); tb.appendChild(tr);
     });
     if (list.length > 300) { var tr2 = document.createElement('tr'), td2 = document.createElement('td'); td2.colSpan = 3; td2.className = 'loc'; td2.textContent = '… und ' + (list.length - 300) + ' weitere (in der kommentierten PDF und im Sheet).'; tr2.appendChild(td2); tb.appendChild(tr2); }
@@ -358,6 +356,27 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   }
 
   function refreshResult() { renderChips(); renderList(); updateButtons(); }
+
+  // Bericht als Google Doc: Titel wie das geprüfte Dokument, Zusammenfassung, Checkliste nach Schwere,
+  // umfassende Erklärung. Fehler dabei sind nicht kritisch: die Funde stehen auch in Liste, PDF und Sheet.
+  async function makeDocReport(plan) {
+    if (!docRun || !docRun.reports.length) return;
+    var textRuns = docRun.reports.filter(function(r) { return !r.error && r.note; }).length;
+    var okRuns = docRun.reports.filter(function(r) { return !r.error; }).length;
+    var counts = {}, order = [];
+    issues.forEach(function(i) {
+      if (i.type === 'prompt') return;
+      var c = catOf(i);
+      if (!counts.hasOwnProperty(c)) { counts[c] = 0; order.push(c); }
+      counts[c]++;
+    });
+    var meta = {
+      language: info.language, pages: plan.pages,
+      mode: !okRuns ? '' : (textRuns === 0 ? 'pdf' : (textRuns === okRuns ? 'text' : 'mixed')),
+      pageChecks: order.map(function(c) { return { label: catLabel(c), n: counts[c] }; })
+    };
+    try { docReportUrl = (await server('apiPdfBrowserDocReport', info.name, docRun.reports, meta)).url || ''; } catch (e) { /* nicht kritisch */ }
+  }
 
   function showResult(plan, ms) {
     el('resBox').style.display = ''; el('diagBox').style.display = '';
@@ -385,6 +404,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
       var pagesP = checkAll(plan), docP = runDocPrompts(plan);
       var pagesOk = await pagesP; await docP;
       if (!pagesOk) { busy(false); return; }
+      await makeDocReport(plan);
       bar(100);
       showResult(plan, Date.now() - t0);
       el('msg').textContent = 'Fertig.';
