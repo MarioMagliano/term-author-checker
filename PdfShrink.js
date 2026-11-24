@@ -247,6 +247,20 @@ function pdfRebuild_(reader, opts) {
   var budget = opts.imageBudget === undefined ? Infinity : opts.imageBudget;
   var plan = _pdfShrinkPlan_(reader);
   var texts = reader.readMany(plan.ranges.map(function(r) { return [r[0], r[1]]; }));
+  var st = _pdfRebuildClassify_(plan, texts, budget);
+  texts = null;
+  var full = _pdfShrinkFullRanges_(st.fullNeeded);
+  var parts = full.ranges.length ? reader.readMany(full.ranges) : [];
+  return _pdfRebuildFinish_(st, full, parts);
+}
+
+// pdfRebuild_ in Schritten, damit es auch dort laufen kann, wo das Lesen
+// nicht synchron ist (Browser: Bereiche parallel per fetch laden, dann hier
+// weiter). Reihenfolge: _pdfShrinkPlan_ -> Bereiche lesen -> _pdfRebuildClassify_
+// -> _pdfShrinkFullRanges_ -> Bereiche lesen -> _pdfRebuildFinish_.
+
+/** Ordnet die gelesenen Bereiche ein und waehlt die Bilder aus. */
+function _pdfRebuildClassify_(plan, texts, budget) {
   var bytesRead = 0;
   texts.forEach(function(t) { bytesRead += t.length; });
 
@@ -257,23 +271,24 @@ function pdfRebuild_(reader, opts) {
     for (var i in c.images) if (c.images.hasOwnProperty(i)) images[i] = c.images[i];
     Array.prototype.push.apply(fullNeeded, c.fullNeeded);
   });
-  texts = null;
 
   var sel = _pdfShrinkSelectImages_(images, budget);
   for (var pk in sel.kept) if (sel.kept.hasOwnProperty(pk)) kept[pk] = sel.kept[pk];
   sel.keepFromImage.forEach(function(num) { kept[num] = images[num].text; });
   Array.prototype.push.apply(fullNeeded, sel.fullNeeded);
+  return { plan: plan, kept: kept, fullNeeded: fullNeeded, sel: sel, bytesRead: bytesRead };
+}
 
-  var full = _pdfShrinkFullRanges_(fullNeeded);
-  var parts = full.ranges.length ? reader.readMany(full.ranges) : [];
-  var joined = fullNeeded.map(function() { return []; });
-  parts.forEach(function(t, k) { bytesRead += t.length; joined[full.owners[k]].push(t); });
-  fullNeeded.forEach(function(o, idx) { kept[o[0]] = _pdfShrinkKeepText_(joined[idx].join('')); });
+/** Setzt die nachgeladenen grossen Objekte ein und baut das Modell der neuen Datei. */
+function _pdfRebuildFinish_(st, full, parts) {
+  var joined = st.fullNeeded.map(function() { return []; });
+  parts.forEach(function(t, k) { st.bytesRead += t.length; joined[full.owners[k]].push(t); });
+  st.fullNeeded.forEach(function(o, idx) { st.kept[o[0]] = _pdfShrinkKeepText_(joined[idx].join('')); });
 
-  var model = _pdfShrinkFinish_(plan, kept);
-  model.imagesRemoved = sel.imagesRemoved;
-  model.imagesKept = sel.imagesKept;
-  model.bytesRead = bytesRead;
+  var model = _pdfShrinkFinish_(st.plan, st.kept);
+  model.imagesRemoved = st.sel.imagesRemoved;
+  model.imagesKept = st.sel.imagesKept;
+  model.bytesRead = st.bytesRead;
   return model;
 }
 

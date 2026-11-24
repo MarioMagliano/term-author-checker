@@ -47,6 +47,17 @@ function apiOpenRulesModal(hostApp) {
   host.ui.showModalDialog(ui, 'Kärcher TermCheck – Rules & Custom Prompts');
 }
 
+// Dieselbe Regel-Oberflaeche wie das Popup in Docs/Sheets/Slides (apiOpenRulesModal),
+// aber als eigene Seite der Web-App (?page=rules): ohne Dokument, in einem
+// Browser-Fenster. Die Regeln liegen pro Nutzer (UserProperties), sind also
+// dieselben wie im Add-on.
+function _renderRulesPage_(e) {
+  return renderWithI18n_('AuthorCheck', 'web', true)
+    .setTitle('Kärcher TermCheck – Rules & Custom Prompts')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
 function apiMarkRulesHelpSeen() {
   PropertiesService.getUserProperties().setProperty('AUTHORCHECK_RULES_HELP_SEEN', 'true');
   return true;
@@ -358,7 +369,7 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   // Ohne Gesamtdokument-Bericht bricht ein komplett fehlgeschlagener Lauf ab;
   // mit Bericht wird der Bericht trotzdem geliefert.
   var docNotes = promptParts.docNotes || [];
-  var reports = docReports.length ? _finishDocPromptReports_(docCtx.fileName, docReports, 'reports', docNotes)
+  var reports = docReports.length ? _finishDocPromptReports_(docCtx.fileName, docReports, 'reports', docNotes, { language: lang, pageChecks: _docReportPageChecks_(issues) })
     : (docNotes.length ? { url: '', items: [], notes: docNotes } : null);
   var promptIssues = _docPromptAllIssues_(docReports);
   if (failedParts === responses.length && !(reports && reports.url) && !promptIssues.length) throw firstError;

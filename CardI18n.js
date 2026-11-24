@@ -111,6 +111,8 @@ var CARD_I18N = {
     'type.terminology': 'Terminology',
     'type.style': 'Style',
     'type.prompt': 'Custom prompt',
+    'ann.severity': 'Severity',
+    'ann.evidence': 'Evidence',
     'c.suggestion': 'Suggestion',
     'c.slide': 'Slide {n}'
   },
@@ -216,6 +218,8 @@ var CARD_I18N = {
     'type.terminology': 'Terminologie',
     'type.style': 'Stil',
     'type.prompt': 'Eigener Prompt',
+    'ann.severity': 'Schwere',
+    'ann.evidence': 'Beleg',
     'c.suggestion': 'Vorschlag',
     'c.slide': 'Folie {n}'
   },

@@ -8,6 +8,10 @@ const DEFAULT_AI_PROMPT = 'Du bist ein Terminologie-Assistent für Kärcher, Her
 function doGet(e) {
   // PDF-Prüffenster aus dem Drive-Add-on (siehe DrivePdfWeb.gs)
   if (e && e.parameter && e.parameter.page === 'pdfcheck') return _renderPdfCheckPage_(e);
+  // PDF im Browser lesen (Prototyp, siehe PdfBrowserApi.js)
+  if (e && e.parameter && e.parameter.page === 'pdfbrowser') return _renderPdfBrowserPage_(e);
+  // Regeln und eigene Prompts als eigenstaendige Seite (Popup aus dem Translation-Services-Portal)
+  if (e && e.parameter && e.parameter.page === 'rules') return _renderRulesPage_(e);
   return HtmlService.createTemplateFromFile('TermSearch').evaluate()
     .setTitle('Kärcher TermCheck – Terminology Search')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)

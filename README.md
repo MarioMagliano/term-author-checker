@@ -27,10 +27,11 @@ Findet Fehler mit Gemini, korrigiert direkt im Dokument und kommentiert PDFs.
 | `Authorcheck.js`, `Rules.js`, `RuleTexts_*.js` | Author Check und Regelwerk |
 | `DocPrompts.js` | Prompts, die das ganze Dokument prüfen |
 | `DriveAddon.js`, `DrivePdfPrep.js`, `DrivePdfWeb.js` | PDF-Check in Drive |
-| `PdfAnnotate.js`, `PdfShrink.js`, `PdfInflate.js`, `PdfTextPosition.js` | PDF-Verarbeitung ohne Fremdbibliothek |
+| `PdfAnnotate.js`, `PdfShrink.js`, `PdfInflate.js`, `PdfTextPosition.js`, `PdfAnnotateSearch.js` | PDF-Verarbeitung ohne Fremdbibliothek (reine Funktionen, laufen auch im Browser) |
+| `PdfBrowserApi.js`, `PdfBrowser.html`, `PdfBrowserClient.html`, `PdfWorkerSource.html` | PDF im Browser lesen (Prototyp, siehe unten) |
 | `Folders.js` | Ordnerstruktur „Kärcher TermCheck“ im eigenen Drive |
 | `*.html` | Oberflächen (Sidebar, Author Check, Terminologiesuche, PDF-Check) |
-| `test/` | Node-Tests für die PDF-Verarbeitung |
+| `test/`, `tools/` | Node-Tests und Build-Skript für die PDF-Verarbeitung (nicht von clasp hochgeladen) |
 
 ## Einrichtung
 
@@ -72,6 +73,10 @@ Danach in Apps Script die Add-on-Bereitstellung und die Web-App-Bereitstellung a
 |---|---|
 | `node test/annotate-flow.cjs` | kompletter Ablauf „kommentierte PDF“ gegen ein simuliertes Drive |
 | `node test/pdf-memory.cjs` | Speicherverbrauch der PDF-Verarbeitung |
+| `node test/rules-page.cjs` | Regel-Popup als eigene Seite (`?page=rules`) im Browser, ohne Docs/Sheets (Playwright nötig) |
+| `node test/browser-api.cjs` | Serverseite der Browser-Prüfung (`PdfBrowserApi.js`) mit Platzhaltern für die Apps-Script-Dienste, echter Gemini-Anfrage- und Antwortcode |
+| `node test/browser-engine.cjs` | PDF-Verarbeitung im Browser (Chromium, Playwright nötig) gegen ein simuliertes Drive, Ergebnis Byte für Byte wie in Apps Script |
+| `node tools/build-pdf-worker.cjs --check` | `PdfWorkerSource.html` ist aktuell |
 | `GeminiTest.js` (im Editor) | Verbindung zu Gemini |
 
 ## Betrieb und Fehlersuche
@@ -99,3 +104,44 @@ Set the Script Properties listed under *Einrichtung*. At minimum: `ADMIN_EMAILS`
 ### Production
 
 Use **Deploy → New deployment** (Add-on and Web app) and update both after each `clasp push`.
+
+## PDF im Browser (Prototyp)
+
+Sehr große PDFs (200 MB, 3000 Seiten) scheitern in Apps Script an Speicher und Laufzeit, schon beim Öffnen.
+Der Prototyp verlagert die PDF-Arbeit in den Browser: Ein Web Worker liest die Datei stückweise per
+HTTP-Range direkt aus Drive (mit dem eigenen Token der Person), sortiert Bilder aus, teilt sie in Prüfpakete und
+baut am Ende den Kommentar-Anhang. Die Kommentare kommen als Incremental Update an das unveränderte Original,
+die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script; dorthin gehen nur die kleinen
+Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prompt, Regeln und Gemini.
+
+- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de&parallel=8`; `parallel` = Pakete gleichzeitig bei Gemini, 1 bis 12, Standard 6). Datei und Sprache wählen,
+  „Mit Gemini prüfen". Ergebnisliste, „Kommentierte PDF erzeugen" (Download) und „Als Sheet exportieren".
+  Mit vorbefülltem Link startet nichts von allein, weil eine Prüfung Gemini-Anfragen kostet.
+- **Ablauf:** Datei öffnen → in Pakete teilen → bis zu 6 Pakete gleichzeitig an `apiPdfBrowserCheckPart` (je 3 Versuche;
+  scheitert ein Paket, wird es Seite für Seite wiederholt, Seiten ohne Ergebnis werden gemeldet) → Funde ohne
+  Doppelte zusammenführen → Protokoll (`DRIVE_PDF_CHECK_RUN`, mit dem Zusatz „browser").
+- **Gleicher Code:** Der Worker besteht aus denselben Modulen wie Apps Script (`PdfInflate`, `PdfTextPosition`,
+  `PdfAnnotate`, `PdfShrink`, `PdfAnnotateSearch`) plus `tools/pdf-worker-main.txt`. Nach jeder Änderung an einem
+  Modul `node tools/build-pdf-worker.cjs` ausführen und `PdfWorkerSource.html` mit einchecken.
+- **Regeln als eigene Seite:** `<Web-App-URL>?page=rules` zeigt dasselbe Popup „Rules & Custom Prompts“ wie in Docs, Sheets und Slides, aber in einem Browser-Fenster (Aufruf aus dem Translation-Services-Portal, Reiter [FTS-C]). Die Regeln liegen pro Nutzer, sind also dieselben wie im Add-on.
+- **Gesamtdokument-Prompts (z. B. Gems):** laufen parallel zu den Seitenpaketen, je Prompt eine Anfrage über das ganze Dokument (`apiPdfBrowserDocPrompts`). Passt die neu aufgebaute PDF in die Grenze `DOC_PROMPT_PDF_MAX_MB` (Standard 13 MB), geht sie als PDF mit, sonst oder bei einer abgelehnten Anfrage läuft der Prompt mit dem Text aller Seiten (wie im Add-on). Die Funde erscheinen mit dem Namen des Prompts als eigene Kategorie, der Bericht als Google Doc (`apiPdfBrowserDocReport`) ist verlinkt.
+- **Eine Anmerkung je Fund:** Ein gefundener Text bekommt eine gelbe Markierung, die den Kommentar selbst trägt (ein Eintrag im Kommentarfeld von Acrobat). Nur wenn die Stelle nicht gefunden wird, gibt es stattdessen eine Notiz oben links auf der Seite. Das gilt für das Browser-Fenster und für das Drive-Add-on.
+- **Filter:** Die Kategorien im Ergebnis (Terminologie, Grammatik, Rechtschreibung, Stil und je ein Chip pro Gesamtdokument-Prompt) sind Schalter. Liste, kommentierte PDF und Sheet nutzen nur die eingeschalteten; die Zahl steht in den Knöpfen.
+- **Meldungen:** Hinweise zu ausgeschalteten Prompts erscheinen nicht. Gezeigt werden nur echte Probleme (ein Prompt ist fehlgeschlagen, Seiten ohne Ergebnis).
+- **Anzahl Gesamtdokument-Prompts:** Je Prüfung laufen höchstens 5 (Standard). Die Skripteigenschaft `DOC_PROMPT_MAX` (1 bis 12) ändert das. Prompts über der Grenze laufen nicht; die Seite nennt sie mit Namen, statt sie still wegzulassen. Jeder Prompt ist eine eigene Anfrage mit dem ganzen Dokument und läuft parallel zu den anderen.
+- **Prompt-Cache:** Der Prompt wird 5 Minuten je Sprache zwischengespeichert (`CacheService`); Regeländerungen
+  greifen danach.
+
+Gemessen (Chromium, simuliertes Drive mit 100 ms Verzögerung je Anfrage): Eine PDF mit 205 MB und 300 Seiten
+öffnet in ca. 5 s und liest dabei nur ca. 2 MB, weil die Bilder nur angelesen werden (die Struktur kommt in
+kleinen Blöcken, die Objekte als parallele Range-Anfragen). 3000 Seiten (122 MB, kleine Bilder) öffnen in ca. 1,5 s;
+150 Funde in 3000 Seiten suchen in ca. 12 s. Das Ergebnis ist Byte für Byte gleich wie mit den Apps-Script-Modulen und
+öffnet in pypdf. Gegenmessung in der echten Umgebung (CBR-Handbuch, 215 MB, 462 Seiten): Die erste Fassung las
+die ganze Datei in 8-MB-Blöcken und brauchte 55 s; deshalb liest der Worker jetzt nur noch die nötigen Bereiche.
+
+Wichtig bei parallelen Anfragen: `fetch(..., { cache: 'no-store' })`. Alle Bereiche haben dieselbe Adresse, der
+HTTP-Cache des Browsers reiht Anfragen auf dieselbe Adresse sonst hintereinander ein.
+
+Nicht in der echten Umgebung geprüft (Testseite zeigt es): Worker aus Blob-URL im Apps-Script-Frame,
+CORS-Anfrage mit Token an `www.googleapis.com`, Dateidownload aus dem Frame. Das Token hält Drive-Zugriff ca. eine
+Stunde, eine Sitzung länger als das bricht mit einer klaren Meldung ab.

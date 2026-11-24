@@ -405,23 +405,22 @@ function pdfAnnotationUpdate_(ctx, pageAnnotations) {
         newAnnotRefs.push(hlNum);
       }
 
-      // Rect wird, falls vom Aufrufer nicht explizit vorgegeben, relativ zur
-      // tatsächlichen Seitengröße oben links gestapelt platziert (ein
-      // 20x20pt "Sprechblasen"-Icon pro Fund, mit 26pt Abstand).
-      var rect = ann.rect;
-      if (!rect) {
+      // Eine Anmerkung je Fund: Mit Markierung traegt sie selbst den Kommentar (ein Eintrag
+      // im Kommentarfeld von Acrobat). Nur wenn die Stelle nicht gefunden wurde, gibt es
+      // stattdessen eine Notiz (20x20pt "Sprechblase") oben links auf der Seite, mit 26pt
+      // Abstand uebereinander gestapelt.
+      if (!(ann.highlight && ann.highlight.length)) {
         var iconSize = 20, gap = 26, margin = 16;
         var x = mediaBox[0] + margin;
         var y = mediaBox[3] - margin - iconSize - (stackIdx++ * gap);
         if (y < mediaBox[1] + margin) y = mediaBox[1] + margin; // nicht unten aus der Seite laufen
-        rect = [x, y, x + iconSize, y + iconSize];
+        var rect = [x, y, x + iconSize, y + iconSize];
+        var annotNum = nextNum++;
+        newObjects.push({ num: annotNum, body:
+          '<< /Type /Annot /Subtype /Text /Rect [' + _pdfNumList_(rect) + '] /Contents ' + contentsHex +
+          ' /T ' + titleHex + ' /Name /Comment /Open false /C [1 0.93 0] >>' });
+        newAnnotRefs.push(annotNum);
       }
-      var annotNum = nextNum++;
-      var body =
-        '<< /Type /Annot /Subtype /Text /Rect [' + _pdfNumList_(rect) + '] /Contents ' + contentsHex +
-        ' /T ' + titleHex + ' /Name /Comment /Open false /C [1 0.93 0] >>';
-      newObjects.push({ num: annotNum, body: body });
-      newAnnotRefs.push(annotNum);
     });
 
     var combinedRefs = existingAnnotsRaw.replace(/^\s+|\s+$/g, '');

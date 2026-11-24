@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<style>
+:root{ --yellow:#FFED00; --ink:#3A3A3A; --white:#fff; --g50:#FAFAFA; --g150:#E9E9E9; --g300:#C4C4C4; --g500:#767676; --red:#D32F2F; --green:#2E7D32;
+  --ff:"Inter","Helvetica Neue",Helvetica,Arial,sans-serif; }
+*,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
+body{ background:var(--white); color:var(--ink); font-family:var(--ff); font-size:15px; -webkit-font-smoothing:antialiased; }
+#app{ max-width:980px; margin:0 auto; padding:22px 24px 40px; }
+h1{ font-size:20px; font-weight:700; margin-bottom:4px; }
+.lead{ color:var(--g500); font-size:13.5px; line-height:1.5; margin-bottom:18px; }
+.box{ border:1px solid var(--g150); padding:16px; margin-bottom:14px; }
+.box h2{ font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; margin-bottom:10px; }
+label{ display:block; font-size:12.5px; font-weight:600; color:var(--g500); margin:8px 0 3px; }
+input[type=text], input[type=number], select{ width:100%; padding:9px 10px; border:1px solid var(--g300); font:inherit; background:#fff; }
+.row{ display:flex; gap:10px; } .row > *{ flex:1; } .row > .narrow{ flex:0 0 240px; }
+button{ margin-top:12px; margin-right:8px; padding:10px 18px; border:0; background:var(--yellow); color:#000; font:inherit; font-weight:700; cursor:pointer; }
+button.sec{ background:var(--g150); }
+button[disabled]{ opacity:.45; cursor:default; }
+table{ width:100%; border-collapse:collapse; font-size:13.5px; margin-top:6px; }
+td, th{ padding:6px 4px; border-bottom:1px solid var(--g150); vertical-align:top; text-align:left; }
+#steps td:first-child{ width:26px; text-align:center; }
+td.v{ text-align:right; font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; }
+.ok{ color:var(--green); } .bad{ color:var(--red); } .wait{ color:var(--g500); }
+.bar{ height:6px; background:var(--g150); margin-top:10px; } .bar > i{ display:block; height:100%; width:0; background:var(--yellow); transition:width .2s; }
+.msg{ margin-top:10px; font-size:13.5px; line-height:1.5; } .msg.bad{ font-weight:600; color:var(--red); } .msg.note{ background:#FFFBE0; padding:8px 10px; border-left:3px solid var(--yellow); }
+a.dl{ display:inline-block; margin-top:12px; padding:10px 18px; background:var(--ink); color:#fff; font-weight:700; text-decoration:none; }
+.chips{ display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 10px; } .chip{ border:1px solid var(--g150); background:var(--g50); padding:4px 10px; font-size:12.5px; }
+.chip.tog{ cursor:pointer; user-select:none; background:var(--white); border-color:var(--g300); } .chip.tog:hover{ border-color:var(--ink); }
+.chip.tog.on{ background:var(--yellow); border-color:var(--ink); } .chip.tog.off{ opacity:.5; }
+.chip.all{ border-style:dashed; cursor:pointer; }
+#issues td.t{ white-space:nowrap; font-size:11.5px; font-weight:700; letter-spacing:.3px; text-transform:uppercase; }
+#issues del{ color:var(--red); } #issues ins{ color:var(--green); text-decoration:none; font-weight:600; }
+#issues .loc{ color:var(--g500); font-size:12px; }
+details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>PDF-Check im Browser (Prototyp)</h1>
+  <p class="lead">Für große PDFs. Der Browser liest die Datei selbst stückweise aus Drive (mit deinem eigenen Zugang), teilt sie in Pakete und lässt diese von Gemini prüfen. Die Kommentare kommen lokal ans unveränderte Original, die Bilder werden nicht heruntergerechnet und die PDF läuft nicht durch Apps Script.</p>
+
+  <div class="box">
+    <h2>1 · Prüfen</h2>
+    <div class="row">
+      <div><label for="file">Drive-Datei (Link oder ID)</label>
+        <input type="text" id="file" value="<?= fileId ?>" placeholder="https://drive.google.com/file/d/…"></div>
+      <div class="narrow"><label for="lang">Sprache der zu prüfenden Texte</label><select id="lang"></select></div>
+    </div>
+    <button id="checkBtn">Mit Gemini prüfen</button>
+    <button id="readBtn" class="sec">Nur lesen (Diagnose)</button>
+    <div class="bar"><i id="bar"></i></div>
+    <table id="steps"></table>
+    <div class="msg" id="msg"></div>
+    <div id="notes"></div>
+  </div>
+
+  <div class="box" id="resBox" style="display:none">
+    <h2>2 · Ergebnis</h2>
+    <div class="chips" id="chips"></div>
+    <div id="docReport"></div>
+    <button id="annBtn">Kommentierte PDF erzeugen</button>
+    <button id="sheetBtn" class="sec">Als Sheet exportieren</button>
+    <div class="msg" id="annMsg"></div>
+    <div id="dl"></div>
+    <table id="issues"></table>
+  </div>
+
+  <div class="box" id="diagBox" style="display:none">
+    <details>
+      <summary>Diagnose: Probe-Kommentar setzen</summary>
+      <label for="quote">Text, der markiert werden soll (wörtlich aus der PDF)</label>
+      <input type="text" id="quote" placeholder="z. B. ein Satzanfang von Seite 1">
+      <div class="row">
+        <div><label for="pageNo">Seite</label><input type="number" id="pageNo" value="1" min="1"></div>
+        <div><label for="note">Kommentar</label><input type="text" id="note" value="Testkommentar (Browser-Prototyp)"></div>
+      </div>
+      <button id="probeBtn">Kommentar setzen und PDF erzeugen</button>
+      <div class="msg" id="probeMsg"></div>
+      <div id="probeDl"></div>
+    </details>
+  </div>
+</div>
+
+<?!= include('PdfWorkerSource'); ?>
+<?!= include('PdfBrowserClient'); ?>
+<script>
+(function() {
+  var LANGS = <?!= JSON.stringify(languages) ?>;
+  var LAST_LANG = <?!= JSON.stringify(lastLang) ?>;
+  var PARALLEL = <?!= JSON.stringify(parallel) ?>;   // Pakete gleichzeitig bei Gemini (Link: &parallel=1..12, Standard 6)
+  var RETRY_MS = window.PDF_BROWSER_RETRY_MS || 1500;   // Wartezeit vor einem neuen Versuch (Tests verkürzen sie)
+  var IMAGE_BUDGET = 12 * 1024 * 1024;   // wie DRIVE_PDF_IMAGE_BUDGET: so viele Bildbytes bleiben bei großen PDFs
+
+  var pdf = null, info = null, opened = null, issues = [], failed = [], steps = [];
+  var seen = {}, docReportUrl = '', docRun = null, activeCats = {}, catOrder = [], catCounts = {}, resultMeta = null;
+  var TYPE_LABELS = { terminology: 'Terminologie', grammar: 'Grammatik', spelling: 'Rechtschreibung', style: 'Stil', prompt: 'Prompt' };
+  var el = function(id) { return document.getElementById(id); };
+
+  function mb(n) { return (Math.round(n / 1048576 * 10) / 10).toLocaleString('de-DE') + ' MB'; }
+  function sec(ms) { return (Math.round(ms / 100) / 10).toLocaleString('de-DE') + ' s'; }
+  function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+  function esc(t) { return String(t === undefined || t === null ? '' : t).replace(/[&<>"']/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function bar(p) { el('bar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
+  function server(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function(res, rej) {
+      var run = google.script.run.withSuccessHandler(res).withFailureHandler(function(e) { rej(new Error(e && e.message ? e.message : String(e))); });
+      run[fn].apply(run, args);
+    });
+  }
+
+  LANGS.forEach(function(pair) {
+    var o = document.createElement('option');
+    o.value = pair[0]; o.textContent = pair[1] + ' (' + pair[0] + ')';
+    if (pair[0] === LAST_LANG) o.selected = true;
+    el('lang').appendChild(o);
+  });
+
+  function render() {
+    el('steps').innerHTML = steps.map(function(s) {
+      var icon = s.state === 'ok' ? '<span class="ok">✔</span>' : s.state === 'bad' ? '<span class="bad">✖</span>' : '<span class="wait">…</span>';
+      return '<tr><td>' + icon + '</td><td>' + esc(s.label) + (s.note ? '<div class="wait" style="font-size:12.5px">' + esc(s.note) + '</div>' : '') + '</td><td class="v">' + esc(s.value) + '</td></tr>';
+    }).join('');
+  }
+  function step(label) { var s = { label: label, state: 'wait' }; steps.push(s); render(); return s; }
+  function done(s, value, note) { s.state = 'ok'; s.value = value; if (note !== undefined) s.note = note; render(); }
+  function update(s, value, note) { s.value = value; if (note !== undefined) s.note = note; render(); }
+  function fail(s, err) {
+    s.state = 'bad'; s.note = String(err && err.message || err); render();
+    el('msg').className = 'msg bad'; el('msg').textContent = s.label + ' hat nicht funktioniert: ' + s.note;
+  }
+  function busy(on) {
+    ['checkBtn', 'readBtn', 'annBtn', 'sheetBtn', 'probeBtn'].forEach(function(id) { el(id).disabled = on; });
+    if (!on) updateButtons();
+  }
+  function reset() {
+    steps = []; issues = []; failed = []; opened = null; seen = {}; docReportUrl = ''; docRun = null; activeCats = {}; catOrder = []; catCounts = {}; resultMeta = null; render();
+    el('docReport').innerHTML = '';
+    el('msg').textContent = ''; el('msg').className = 'msg'; el('notes').innerHTML = '';
+    el('resBox').style.display = 'none'; el('diagBox').style.display = 'none';
+    el('annMsg').textContent = ''; el('dl').innerHTML = ''; el('probeDl').innerHTML = ''; el('probeMsg').textContent = '';
+    bar(0);
+    if (pdf) { pdf.close(); pdf = null; }
+  }
+  function note(text) { var d = document.createElement('div'); d.className = 'msg note'; d.textContent = text; el('notes').appendChild(d); }
+
+  // Gemeinsamer Anfang: Datei prüfen, Worker starten, PDF lesen.
+  async function openFile(imageBudgetFor) {
+    var s = step('Datei prüfen, Regeln und Drive-Zugang holen');
+    try { info = await server('apiPdfBrowserPrepare', el('file').value, el('lang').value); done(s, mb(info.size), info.name); }
+    catch (e) { fail(s, e); return false; }
+    bar(5);
+    if (info.docPromptsSkipped && info.docPromptsSkipped.length) {
+      note(info.docPromptsSkipped.length + ' Gesamtdokument-Prompt(s) laufen nicht, weil höchstens ' + info.docPromptMax + ' gleichzeitig laufen: ' +
+        info.docPromptsSkipped.join(', ') + '. Schalte andere Prompts aus oder erhöhe die Skripteigenschaft DOC_PROMPT_MAX (bis 12).');
+    }
+    s = step('Worker im Browser starten');
+    try { pdf = PdfBrowser.create(); done(s, 'ok'); } catch (e) { fail(s, e); return false; }
+
+    s = step('Direkt von Drive lesen (Range-Anfrage aus dem Browser)');
+    try {
+      var r = await fetch(PdfBrowser.driveUrl(info.fileId), { cache: 'no-store', headers: { Authorization: 'Bearer ' + info.token, Range: 'bytes=0-7' } });
+      var head = new Uint8Array(await r.arrayBuffer());
+      var magic = String.fromCharCode.apply(null, head.subarray(0, 5));
+      if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
+      if (magic !== '%PDF-') throw new Error('Kein PDF-Anfang gelesen (' + magic + ').');
+      done(s, 'HTTP ' + r.status);
+    } catch (e) { fail(s, e); return false; }
+    bar(10);
+
+    s = step('PDF öffnen (Struktur lesen, Bilder aussortieren)');
+    try {
+      opened = await pdf.open({ fileId: info.fileId, token: info.token, size: info.size, imageBudget: imageBudgetFor(info) }, function(p) {
+        var f = p.done / Math.max(1, p.total);
+        bar(10 + (p.step === 0 ? Math.round(18 * f) : 18 + Math.round(2 * f)));
+      });
+      done(s, sec(opened.ms), opened.pages.toLocaleString('de-DE') + ' Seiten · ' + mb(opened.downloadedBytes) + ' gelesen in ' +
+        opened.requests + ' Anfragen · Bilder behalten ' + opened.imagesKept + ', entfernt ' + opened.imagesRemoved);
+    } catch (e) { fail(s, e); return false; }
+    bar(30);
+    return true;
+  }
+
+  // ─── Prüfen ───────────────────────────────────────────────────────────────
+  function addIssues(list) {
+    (list || []).forEach(function(i) {
+      var k = i.original + '\u0000' + i.suggestion;
+      if (seen[k]) return;
+      seen[k] = true; issues.push(i);
+    });
+  }
+
+  // Gesamtdokument-Prompts (z. B. Gems): je Prompt eine Anfrage über das ganze Dokument. Läuft
+  // gleichzeitig mit den Seitenpaketen. Passt die neu aufgebaute PDF in eine Anfrage, geht sie als PDF
+  // mit; sonst oder wenn die Anfrage scheitert, läuft der Prompt mit dem Text aller Seiten (wie im Add-on).
+  async function runDocPrompts(plan) {
+    var titles = info.docPromptTitles || [];
+    if (!titles.length) return;
+    var s = step('Gesamtdokument-Prompts');
+    try {
+      var mode = opened.shrunkBytes <= (info.docMaxBytes || 13 * 1024 * 1024) ? 'pdf' : 'text';
+      var reports = new Array(titles.length), all = titles.map(function(t, i) { return i; });
+      update(s, '0 / ' + titles.length, titles.join(' · '));
+      var attempt = async function(m, idxs) {
+        var req = { language: info.language, fileName: info.name, pages: plan.pages, sizeBytes: opened.shrunkBytes, mode: m, indexes: idxs };
+        if (m === 'pdf') req.b64 = (await pdf.whole()).b64; else req.texts = (await pdf.pageTexts()).texts;
+        var res = await server('apiPdfBrowserDocPrompts', req);
+        (res.indexes || []).forEach(function(orig, k) { reports[orig] = res.reports[k]; });
+      };
+      var badOnes = function() { return all.filter(function(i) { return !reports[i] || reports[i].error; }); };
+      try { await attempt(mode, all); } catch (e) { /* alle Prompts dieses Versuchs gelten als nicht gelaufen */ }
+      var bad = badOnes();
+      if (bad.length) {
+        update(s, (titles.length - bad.length) + ' / ' + titles.length, bad.length + ' Prompt(s) laufen noch einmal mit dem Seitentext');
+        await sleep(RETRY_MS);
+        try { await attempt('text', bad); } catch (e) { /* bleibt fehlgeschlagen */ }
+        bad = badOnes();
+      }
+      reports.forEach(function(r) { if (r && !r.error) addIssues(r.issues); });
+      // Der Bericht (Google Doc) entsteht am Ende des Laufs, wenn auch die Zahlen der Seitenprüfung feststehen.
+      docRun = { reports: reports.map(function(r, i) { return r || { title: titles[i], error: 'keine Antwort' }; }) };
+      bad.forEach(function(i) {
+        note('Gesamtdokument-Prompt „' + titles[i] + '" ist fehlgeschlagen: ' + String((reports[i] && reports[i].error) || 'keine Antwort').replace(/[.\s]+$/, '') + '.');
+      });
+      done(s, (titles.length - bad.length) + ' / ' + titles.length,
+        reports.reduce(function(n, r) { return n + (r && !r.error && r.issues ? r.issues.length : 0); }, 0) + ' Funde');
+    } catch (e) {
+      done(s, '–', 'Nicht gelaufen: ' + String(e && e.message || e));
+    }
+  }
+
+  async function checkAll(plan) {
+    var ranges = plan.ranges, doneParts = 0, next = 0;
+    var imagesRemoved = opened.imagesRemoved > 0;
+    var s = step('Mit Gemini prüfen');
+    function progress() {
+      update(s, doneParts + ' / ' + ranges.length, issues.length + ' Funde' + (failed.length ? ' · Seiten ohne Ergebnis: ' + failed.join(', ') : ''));
+      bar(30 + Math.round(68 * doneParts / Math.max(1, ranges.length)));
+    }
+    var add = addIssues;
+    // Ein Paket (Seiten from..to) prüfen; bis zu 3 Versuche (Gemini oder die Leitung hakt gelegentlich).
+    async function checkRange(from, to, split) {
+      var piece = await pdf.piece(from, to);
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          var r = await server('apiPdfBrowserCheckPart', piece.b64, { language: info.language, from: from, to: to, split: split, imagesRemoved: imagesRemoved });
+          if (!r.failed) return r;
+        } catch (e) { /* nächster Versuch */ }
+        await sleep(RETRY_MS * (attempt + 1));
+      }
+      return { failed: true };
+    }
+    async function lane() {
+      while (next < ranges.length) {
+        var range = ranges[next++], from = range[0], to = range[1];
+        var r = await checkRange(from, to, ranges.length > 1);
+        if (!r.failed) add(r.issues);
+        else if (to - from > 1) {
+          // Das Paket scheitert (zu groß, zu langsam): Seite für Seite.
+          for (var p = from; p < to; p++) {
+            var rp = await checkRange(p, p + 1, true);
+            if (rp.failed) failed.push(p + 1); else add(rp.issues);
+          }
+        } else failed.push(from + 1);
+        doneParts++;
+        progress();
+      }
+    }
+    progress();
+    var lanes = [];
+    for (var k = 0; k < Math.min(PARALLEL, ranges.length); k++) lanes.push(lane());
+    try { await Promise.all(lanes); }
+    catch (e) { fail(s, e); return false; }
+    if (failed.length === plan.pages && !issues.length) { fail(s, new Error('Die KI-Anfrage ist für alle Seiten fehlgeschlagen. Bitte noch einmal versuchen.')); return false; }
+    done(s, ranges.length + ' / ' + ranges.length, issues.length + ' Funde' + (failed.length ? ' · Seiten ohne Ergebnis: ' + failed.join(', ') : ''));
+    return true;
+  }
+
+  // Kategorie eines Fundes: Standardtyp, bei Gesamtdokument-Prompts der Name des Prompts (z. B. des Gems).
+  function catOf(i) { return (i.type === 'prompt' && i.rule) ? 'p:' + i.rule : (i.type || 'style'); }
+  function catLabel(c) { return c.indexOf('p:') === 0 ? c.slice(2) : (TYPE_LABELS[c] || c); }
+  function selected() { return issues.filter(function(i) { return activeCats[catOf(i)]; }); }
+
+  function buildCategories() {
+    var std = ['terminology', 'grammar', 'spelling', 'style'];
+    catCounts = {}; catOrder = []; activeCats = {};
+    issues.forEach(function(i) {
+      var c = catOf(i);
+      if (!catCounts.hasOwnProperty(c)) { catCounts[c] = 0; catOrder.push(c); activeCats[c] = true; }
+      catCounts[c]++;
+    });
+    // Standardtypen zuerst in fester Reihenfolge, danach die Prompts in der Reihenfolge ihres Auftretens.
+    catOrder.sort(function(a, b) {
+      var ia = std.indexOf(a), ib = std.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+  }
+
+  function chipEl(html, cls, onClick) {
+    var c = document.createElement('span');
+    c.className = 'chip ' + cls; c.innerHTML = html;
+    if (onClick) {
+      c.setAttribute('role', 'button'); c.tabIndex = 0;
+      c.onclick = onClick;
+      c.onkeydown = function(ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onClick(); } };
+    }
+    return c;
+  }
+
+  function renderChips() {
+    var box = el('chips'); box.innerHTML = '';
+    var n = selected().length, allOn = catOrder.every(function(c) { return activeCats[c]; });
+    box.appendChild(chipEl('<b>' + n + '</b>' + (n === issues.length ? '' : ' von <b>' + issues.length + '</b>') + ' Funde', '', null));
+    catOrder.forEach(function(c) {
+      var chip = chipEl(esc(catLabel(c)) + ' <b>' + catCounts[c] + '</b>', 'tog ' + (activeCats[c] ? 'on' : 'off'), function() { activeCats[c] = !activeCats[c]; refreshResult(); });
+      chip.setAttribute('data-cat', c); chip.setAttribute('aria-pressed', activeCats[c] ? 'true' : 'false');
+      box.appendChild(chip);
+    });
+    if (!allOn) {
+      var all = chipEl('alle anzeigen', 'all', function() { catOrder.forEach(function(c) { activeCats[c] = true; }); refreshResult(); });
+      all.id = 'chipAll'; box.appendChild(all);
+    }
+    if (resultMeta) {
+      box.appendChild(chipEl('<b>' + resultMeta.plan.pages.toLocaleString('de-DE') + '</b> Seiten · ' + resultMeta.plan.ranges.length + ' Pakete · ' + sec(resultMeta.ms), '', null));
+    }
+    if (failed.length) box.appendChild(chipEl('ohne Ergebnis: Seite ' + esc(failed.join(', ')), 'bad', null));
+  }
+
+  function renderList() {
+    var list = selected();
+    var tb = el('issues');
+    tb.innerHTML = '<tr><th>Typ</th><th>Stelle</th><th>Original → Vorschlag</th></tr>';
+    list.slice(0, 300).forEach(function(i) {
+      var tr = document.createElement('tr'), t = document.createElement('td'), l = document.createElement('td'), c = document.createElement('td');
+      t.className = 't'; t.textContent = catLabel(catOf(i)) + (i.severity ? ' · ' + i.severity : '');
+      l.className = 'loc'; l.textContent = i.location || '';
+      var del = document.createElement('del'), ins = document.createElement('ins');
+      del.textContent = i.original; ins.textContent = i.suggestion;
+      c.appendChild(del); c.appendChild(document.createTextNode(' → ')); c.appendChild(ins);
+      if (i.explanation) { var ex = document.createElement('div'); ex.className = 'loc'; ex.textContent = i.explanation; c.appendChild(ex); }
+      if (i.evidence) { var ev = document.createElement('div'); ev.className = 'loc'; ev.textContent = 'Beleg: ' + i.evidence; c.appendChild(ev); }
+      tr.appendChild(t); tr.appendChild(l); tr.appendChild(c); tb.appendChild(tr);
+    });
+    if (list.length > 300) { var tr2 = document.createElement('tr'), td2 = document.createElement('td'); td2.colSpan = 3; td2.className = 'loc'; td2.textContent = '… und ' + (list.length - 300) + ' weitere (in der kommentierten PDF und im Sheet).'; tr2.appendChild(td2); tb.appendChild(tr2); }
+  }
+
+  // Die Knöpfe arbeiten mit der gefilterten Auswahl; die Zahl steht im Knopf.
+  function updateButtons() {
+    var n = selected().length;
+    el('annBtn').textContent = 'Kommentierte PDF erzeugen (' + n + ')';
+    el('sheetBtn').textContent = 'Als Sheet exportieren (' + n + ')';
+    if (!el('checkBtn').disabled) { el('annBtn').disabled = n === 0; el('sheetBtn').disabled = n === 0; }
+  }
+
+  function refreshResult() { renderChips(); renderList(); updateButtons(); }
+
+  // Bericht als Google Doc: Titel wie das geprüfte Dokument, Zusammenfassung, Checkliste nach Schwere,
+  // umfassende Erklärung. Fehler dabei sind nicht kritisch: die Funde stehen auch in Liste, PDF und Sheet.
+  async function makeDocReport(plan) {
+    if (!docRun || !docRun.reports.length) return;
+    var textRuns = docRun.reports.filter(function(r) { return !r.error && r.note; }).length;
+    var okRuns = docRun.reports.filter(function(r) { return !r.error; }).length;
+    var counts = {}, order = [];
+    issues.forEach(function(i) {
+      if (i.type === 'prompt') return;
+      var c = catOf(i);
+      if (!counts.hasOwnProperty(c)) { counts[c] = 0; order.push(c); }
+      counts[c]++;
+    });
+    var meta = {
+      language: info.language, pages: plan.pages,
+      mode: !okRuns ? '' : (textRuns === 0 ? 'pdf' : (textRuns === okRuns ? 'text' : 'mixed')),
+      pageChecks: order.map(function(c) { return { label: catLabel(c), n: counts[c] }; })
+    };
+    try { docReportUrl = (await server('apiPdfBrowserDocReport', info.name, docRun.reports, meta)).url || ''; } catch (e) { /* nicht kritisch */ }
+  }
+
+  function showResult(plan, ms) {
+    el('resBox').style.display = ''; el('diagBox').style.display = '';
+    resultMeta = { plan: plan, ms: ms };
+    buildCategories();
+    el('docReport').innerHTML = '';
+    if (docReportUrl) {
+      var a = document.createElement('a'); a.href = docReportUrl; a.target = '_blank'; a.id = 'docReportLink'; a.className = 'loc';
+      a.style.cssText = 'display:inline-block;margin:0 0 10px;font-size:13px;font-weight:600;';
+      a.textContent = 'Bericht der Gesamtdokument-Prompts öffnen';
+      el('docReport').appendChild(a);
+    }
+    refreshResult();
+  }
+
+  el('checkBtn').onclick = async function() {
+    busy(true); reset();
+    var t0 = Date.now();
+    try {
+      if (!(await openFile(function(inf) { return inf.size <= inf.maxBytes ? Infinity : IMAGE_BUDGET; }))) { busy(false); return; }
+      var s = step('Seiten in Pakete teilen');
+      var plan;
+      try { plan = await pdf.plan({ pagesPerPart: 4, maxParts: 60 }); done(s, plan.ranges.length + ' Pakete', plan.pages.toLocaleString('de-DE') + ' Seiten'); }
+      catch (e) { fail(s, e); busy(false); return; }
+      var pagesP = checkAll(plan), docP = runDocPrompts(plan);
+      var pagesOk = await pagesP; await docP;
+      if (!pagesOk) { busy(false); return; }
+      await makeDocReport(plan);
+      bar(100);
+      showResult(plan, Date.now() - t0);
+      el('msg').textContent = 'Fertig.';
+      try { await server('apiPdfBrowserLogRun', info.name, issues.length, plan.ranges.length, failed); } catch (e) { /* Protokoll ist nicht kritisch */ }
+    } catch (e) { el('msg').className = 'msg bad'; el('msg').textContent = String(e && e.message || e); }
+    busy(false);
+  };
+
+  el('readBtn').onclick = async function() {
+    busy(true); reset();
+    if (await openFile(function() { return 0; })) {
+      el('msg').textContent = 'Fertig gelesen. Unter „Diagnose" kannst du einen Probe-Kommentar setzen.';
+      el('diagBox').style.display = '';
+      el('diagBox').querySelector('details').open = true;
+    }
+    busy(false);
+  };
+
+  function download(blob, into) {
+    var link = document.createElement('a');
+    link.className = 'dl'; link.id = into === 'dl' ? 'dlLink' : 'probeLink';
+    link.href = URL.createObjectURL(blob);
+    link.download = info.name.replace(/\.pdf$/i, '') + ' (annotated).pdf';
+    link.textContent = 'Kommentierte PDF herunterladen';
+    el(into).innerHTML = ''; el(into).appendChild(link);
+  }
+
+  async function annotate(list, msgId, into) {
+    busy(true); el(msgId).className = 'msg'; el(msgId).textContent = 'Suche Fundstellen …'; el(into).innerHTML = '';
+    try {
+      var r = await pdf.annotate(list, info.labels, function(p) { el(msgId).textContent = 'Suche Fundstellen … ' + p.next + ' von ' + (p.count || 1); });
+      el(msgId).textContent = r.positioned + ' von ' + r.count + ' Stellen genau markiert. Setze die Datei zusammen …';
+      var blob = await pdf.annotatedBlob(r.appendix, function(p) { el(msgId).textContent = 'Lade das Original … ' + Math.round(100 * p.done / p.total) + ' %'; });
+      el(msgId).textContent = r.positioned + ' von ' + r.count + ' Stellen genau markiert' + (r.total > r.count ? ' (nur die ersten ' + r.count + ' von ' + r.total + ' Funden)' : '') + ' · ' + mb(blob.size);
+      download(blob, into);
+    } catch (e) { el(msgId).className = 'msg bad'; el(msgId).textContent = String(e && e.message || e); }
+    busy(false);
+  }
+
+  el('annBtn').onclick = function() { annotate(selected(), 'annMsg', 'dl'); };
+
+  el('sheetBtn').onclick = async function() {
+    busy(true); el('annMsg').className = 'msg'; el('annMsg').textContent = 'Erstelle das Sheet …';
+    try {
+      var url = await server('apiPdfBrowserExportSheet', selected(), info.name, info.language);
+      el('annMsg').innerHTML = ''; var a = document.createElement('a'); a.href = url; a.target = '_blank'; a.textContent = 'Sheet öffnen'; a.id = 'sheetLink';
+      el('annMsg').appendChild(a);
+    } catch (e) { el('annMsg').className = 'msg bad'; el('annMsg').textContent = String(e && e.message || e); }
+    busy(false);
+  };
+
+  el('probeBtn').onclick = function() {
+    var quote = el('quote').value.trim();
+    annotate([{ type: 'style', original: quote || '(Testkommentar)', suggestion: el('note').value, explanation: 'Browser-Prototyp',
+                location: 'Page ' + (parseInt(el('pageNo').value, 10) || 1) }], 'probeMsg', 'probeDl');
+  };
+
+  // Mit vorbefülltem Link (?fileId=...) wird nichts gestartet: eine Prüfung kostet Gemini-Anfragen.
+})();
+</script>
+</body>
+</html>

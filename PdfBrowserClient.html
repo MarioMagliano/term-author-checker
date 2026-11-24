@@ -1,0 +1,134 @@
+<script>
+// ============================================================================
+// PDF IM BROWSER: Seitenseite des Web Workers (PdfWorkerSource.html)
+// ----------------------------------------------------------------------------
+// Die schwere Arbeit (PDF lesen, Bilder aussortieren, Fundstellen suchen,
+// Anhang für die Kommentare bauen) macht der Worker mit denselben Modulen wie
+// Apps Script. Die PDF geht dabei nie durch Apps Script: Der Worker holt sie
+// stückweise per Range-Anfrage direkt von Drive (mit dem eigenen Token der
+// Person). Hier liegt nur die Verwaltung: Worker starten, Befehle schicken,
+// Fortschritt melden und die kommentierte Kopie als Datei zusammensetzen.
+//
+// Benutzung:  var pdf = PdfBrowser.create();
+//             await pdf.open({ fileId, token, size });
+//             var r = await pdf.annotate(issues, labels, onProgress);
+//             var blob = await pdf.annotatedBlob(r.appendix, onProgress);
+// ============================================================================
+var PdfBrowser = (function() {
+  var DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files/';
+  var DOWNLOAD_CHUNK = 16 * 1024 * 1024;
+  var DOWNLOAD_PARALLEL = 4;
+
+  function driveUrl(fileId) {
+    return DRIVE_FILES + encodeURIComponent(fileId) + '?alt=media&supportsAllDrives=true';
+  }
+
+  function sleep(ms) { return new Promise(function(res) { setTimeout(res, ms); }); }
+
+  function create() {
+    var src = document.getElementById('pdf-worker-src').textContent;
+    var url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    var worker = new Worker(url);
+    var pending = {}, seq = 0, cfg = null;
+
+    worker.onmessage = function(ev) {
+      var m = ev.data, p = pending[m.id];
+      if (!p) return;
+      if (m.progress) { if (p.onProgress) p.onProgress(m.progress); return; }
+      delete pending[m.id];
+      if (m.error) { var e = new Error(m.error.message); e.fatal = m.error.fatal; e.pdfStructure = m.error.structure; p.reject(e); }
+      else p.resolve(m);
+    };
+    worker.onerror = function(ev) {
+      var err = new Error('Worker error: ' + (ev && ev.message ? ev.message : 'unknown'));
+      Object.keys(pending).forEach(function(id) { var p = pending[id]; delete pending[id]; p.reject(err); });
+    };
+
+    function call(payload, transfer, onProgress) {
+      return new Promise(function(resolve, reject) {
+        var id = ++seq;
+        pending[id] = { resolve: resolve, reject: reject, onProgress: onProgress };
+        payload.id = id;
+        worker.postMessage(payload, transfer || []);
+      });
+    }
+
+    return {
+      /**
+       * c: { fileId | url, token, size, imageBudget? } - Datei öffnen, Struktur lesen.
+       * imageBudget: Bytes an Bildern, die behalten werden (Standard 0; Infinity = alle).
+       */
+      open: function(c, onProgress) {
+        cfg = { url: c.url || driveUrl(c.fileId), token: c.token, size: c.size, block: c.block };
+        return call({ cmd: 'open', url: cfg.url, token: cfg.token, size: cfg.size, block: cfg.block, imageBudget: c.imageBudget }, [], onProgress)
+          .then(function(m) { return m.result; });
+      },
+      /** Fundstellen suchen und Anhang bauen. Liefert { count, positioned, ..., appendix: Uint8Array }. */
+      annotate: function(issues, labels, onProgress) {
+        return call({ cmd: 'annotate', issues: issues, labels: labels || {} }, [], onProgress).then(function(m) {
+          var r = m.result; r.appendix = m.appendix; return r;
+        });
+      },
+      /** Prüfpakete planen: { pages, ranges: [[von, bis), ...], whole }. Seiten ab 0. */
+      plan: function(opts) {
+        var o = opts || {};
+        return call({ cmd: 'plan', pagesPerPart: o.pagesPerPart, maxParts: o.maxParts }).then(function(m) { return m.result; });
+      },
+      /** Paket für die Seiten [from, to): { bytes, b64 } (PDF als Base64). */
+      piece: function(from, to) {
+        return call({ cmd: 'piece', from: from, to: to }).then(function(m) { return m.result; });
+      },
+      /** Die ganze neu aufgebaute PDF als Base64: { bytes, b64 } (fuer Gesamtdokument-Prompts im PDF-Modus). */
+      whole: function() { return call({ cmd: 'whole' }).then(function(m) { return m.result; }); },
+      /** Text aller Seiten: { texts: [Seite 1, Seite 2, ...] } (Textmodus der Gesamtdokument-Prompts). */
+      pageTexts: function() { return call({ cmd: 'pageTexts' }).then(function(m) { return m.result; }); },
+      /**
+       * Setzt die kommentierte PDF zusammen: Original unverändert (stückweise
+       * von Drive) + Anhang. Ein Blob größerer Dateien hält der Browser auf der
+       * Festplatte, nicht im Arbeitsspeicher.
+       */
+      annotatedBlob: function(appendix, onProgress) {
+        // Jedes Stück wandert sofort in den Blob (Blob-Teile werden nicht kopiert,
+        // der Browser legt sie selbst ab) - der Arbeitsspeicher hält so nie mehr
+        // als ein Stück.
+        // Mehrere Stücke gleichzeitig laden (eine einzelne Verbindung ist bei Drive
+        // oft langsamer als die Leitung), der Reihe nach in den Blob legen.
+        var blob = new Blob([], { type: 'application/pdf' }), starts = [], idx = 0, got = 0;
+        for (var s = 0; s < cfg.size; s += DOWNLOAD_CHUNK) starts.push(s);
+        function next() {
+          if (idx >= starts.length) return Promise.resolve(new Blob([blob, appendix], { type: 'application/pdf' }));
+          var batch = starts.slice(idx, idx + DOWNLOAD_PARALLEL);
+          idx += batch.length;
+          return Promise.all(batch.map(function(from) {
+            var to = Math.min(cfg.size, from + DOWNLOAD_CHUNK) - 1;
+            return getChunk(from, to, 0).then(function(buf) {
+              got += buf.byteLength;
+              if (onProgress) onProgress({ phase: 'download', done: got, total: cfg.size });
+              return buf;
+            });
+          })).then(function(bufs) {
+            blob = new Blob([blob].concat(bufs), { type: 'application/pdf' });
+            return next();
+          });
+        }
+        function getChunk(from, to, attempt) {
+          return fetch(cfg.url, { cache: 'no-store', headers: { Authorization: 'Bearer ' + cfg.token, Range: 'bytes=' + from + '-' + to } })
+            .then(function(res) {
+              if (res.status === 206) return res.arrayBuffer();
+              if (res.status === 200 && from === 0 && to + 1 >= cfg.size) return res.arrayBuffer();
+              throw new Error('Drive download failed (HTTP ' + res.status + ').');
+            })
+            .catch(function(err) {
+              if (attempt >= 3) throw err;
+              return sleep(500 * Math.pow(2, attempt)).then(function() { return getChunk(from, to, attempt + 1); });
+            });
+        }
+        return next();
+      },
+      close: function() { worker.terminate(); URL.revokeObjectURL(url); }
+    };
+  }
+
+  return { create: create, driveUrl: driveUrl };
+})();
+</script>
