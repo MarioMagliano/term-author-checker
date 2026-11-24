@@ -29,7 +29,7 @@
   "addOns": {
     "common": {
       "name": "Kärcher TermCheck",
-      "logoUrl": "https://raw.githubusercontent.com/MarioMagliano/term-author-checker/main/assets/logo.png",
+      "logoUrl": "https://raw.githubusercontent.com/MarioMagliano/term-author-checker/main/assets/logo-staging.png",
       "layoutProperties": {
         "primaryColor": "#FFED00",
         "secondaryColor": "#3A3A3A"
