@@ -67,6 +67,23 @@ clasp push
 
 Danach in Apps Script die Add-on-Bereitstellung und die Web-App-Bereitstellung aktualisieren.
 
+### Logo: STAGING und produktiv
+
+Das Add-on läuft derzeit über die Test-Bereitstellung („Test deployments“, `@HEAD`). Damit man das
+sofort sieht, zeigt `appsscript.json` das Logo mit rotem **STAGING** (`assets/logo-staging.png`).
+Das normale Logo liegt unverändert in `assets/logo.png`.
+
+Zum Umschalten (danach wie gewohnt `clasp push`):
+
+| Befehl | Wirkung |
+|---|---|
+| `node tools/set-logo.cjs` | zeigt, welches Logo gerade eingetragen ist |
+| `node tools/set-logo.cjs staging` | Test-Bereitstellung: Logo mit „STAGING“ |
+| `node tools/set-logo.cjs prod` | **vor einer produktiven Add-on-Bereitstellung** (`Deploy → New deployment`): normales Logo |
+
+Die Bereitstellung übernimmt das Logo aus dem Manifest zum Zeitpunkt der Erstellung. Wer ein
+produktives Add-on bereitstellt, ohne vorher auf `prod` umzuschalten, zeigt dort das STAGING-Logo.
+
 ## Tests
 
 | Befehl | Prüft |
