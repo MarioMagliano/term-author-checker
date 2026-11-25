@@ -118,73 +118,7 @@ function _resolveHost_(e) {
     'Please close the side panel, reload the file and open Kärcher TermCheck again.');
 }
 
-// ─── GLOSSAR AUS DEN TERMBASES BAUEN ───────────────────────────────────────
-var AUTHORCHECK_GLOSSARY_TTL = 21600;
-var AUTHORCHECK_GLOSSARY_MAX_PAIRS = 400;  
-var AUTHORCHECK_GLOSSARY_MAX_PAGES = 20;   
-
-function _buildTerminologyGlossary_(sourceLang) {
-  var lang = String(sourceLang || 'de').trim();
-  var cacheKey = 'AUTHORCHECK_GLOSSARY_' + lang;
-  var cache = CacheService.getScriptCache();
-  var cached = cache.get(cacheKey);
-  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
-
-  var termbases = _getTargetTermbases_();
-  var auth = _phraseAuth_();
-  var pairs = [];
-
-  termbases.forEach(function (tb) {
-    var pageNumber = 0;
-    while (pageNumber < AUTHORCHECK_GLOSSARY_MAX_PAGES) {
-      var body = { pageNumber: pageNumber, pageSize: 50, queryLang: lang };
-      var res;
-      try {
-        res = UrlFetchApp.fetch(PHRASE_V1 + '/termBases/' + encodeURIComponent(tb.uid) + '/browse', {
-          method: 'post', contentType: 'application/json',
-          headers: { Authorization: auth }, payload: JSON.stringify(body), muteHttpExceptions: true
-        });
-      } catch (e) { break; }
-      if (res.getResponseCode() !== 200) break;
-
-      var data;
-      try { data = JSON.parse(res.getContentText()); } catch (e) { break; }
-      var concepts = data.searchResults || data.concepts || [];
-      if (!concepts.length) break;
-
-      concepts.forEach(function (concept) {
-        var allTerms = [];
-        (concept.terms || []).forEach(function (ti) {
-          (Array.isArray(ti) ? ti : [ti]).forEach(function (t) { allTerms.push(t); });
-        });
-        var sameLang = allTerms.filter(function (t) { return (t.lang || t.language || '') === lang; });
-        var forbidden = sameLang.filter(function (t) { return t.forbidden === true; });
-        var approved = sameLang.filter(function (t) { return t.forbidden !== true; });
-        if (forbidden.length && approved.length) {
-          forbidden.forEach(function (f) {
-            var wrong = String(f.text || f.term || '').trim();
-            var correct = String(approved[0].text || approved[0].term || '').trim();
-            if (wrong && correct) pairs.push({ wrong: wrong, correct: correct });
-          });
-        }
-      });
-
-      if (concepts.length < 50) break;
-      pageNumber++;
-    }
-  });
-
-  var seen = {};
-  var unique = pairs.filter(function (p) {
-    var k = p.wrong.toLowerCase();
-    if (seen[k]) return false;
-    seen[k] = true;
-    return true;
-  }).slice(0, AUTHORCHECK_GLOSSARY_MAX_PAIRS);
-
-  try { cache.put(cacheKey, JSON.stringify(unique), AUTHORCHECK_GLOSSARY_TTL); } catch (e) {}
-  return unique;
-}
+// Das Termbase-Glossar (Lesen aus Phrase, Abgleich mit dem Text) steht in TermGlossary.js.
 
 // ─── GLOSSAR + REGELTEXT FÜR DEN PROMPT (geteilt zwischen Docs/Sheets/Slides
 // und dem Drive-PDF-Check, damit eine Anpassung nicht an zwei Stellen gepflegt
@@ -193,9 +127,12 @@ function _buildTerminologyGlossary_(sourceLang) {
 // damit dieses Refactoring den tatsaechlich an die KI gesendeten Text nicht
 // veraendert.
 function _buildAuthorCheckPromptParts_(lang, labels) {
-  var glossary = _buildTerminologyGlossary_(lang);
+  var glossaryInfo = _buildTerminologyGlossaryInfo_(lang);
+  var glossary = glossaryInfo.entries;
+  // Ganze Liste (PDF-Check, ganze Datei ohne Textzugriff); der Author Check in
+  // Docs/Sheets/Slides schickt je Abschnitt nur die Eintraege, die dort vorkommen.
   var termListStr = glossary.length
-    ? glossary.map(function (p) { return '- ' + p.wrong + ' → ' + p.correct; }).join('\n')
+    ? glossary.slice(0, GLOSSARY_PROMPT_MAX).map(_glossaryLine_).join('\n')
     : labels.noGlossary;
 
   // Regelwerke gibt es nur fuer DE und EN. Frueher bekamen alle anderen Sprachen
@@ -224,7 +161,7 @@ function _buildAuthorCheckPromptParts_(lang, labels) {
 
   var docNotes = [];
   try { docNotes = _docPromptNotes_(lang, allRules); } catch (e) { console.warn('Doc prompt notes: ' + e.message); }
-  return { glossary: glossary, termListStr: termListStr, rulesStr: rulesStr, docPrompts: _docPromptsFromRules_(activeRules), docNotes: docNotes };
+  return { glossary: glossary, glossaryPartial: glossaryInfo.partial, termListStr: termListStr, rulesStr: rulesStr, docPrompts: _docPromptsFromRules_(activeRules), docNotes: docNotes };
 }
 
 // Parst die Gemini-Antwort im {"issues":[...]} Format, gemeinsam genutzt von
@@ -252,6 +189,9 @@ function _parseGeminiIssuesResponse_(res, requestFailedMessage) {
 // abgeschnitten, sondern in Abschnitte zerlegt, die parallel geprüft werden.
 var AUTHORCHECK_CHUNK_CHARS = 12000;
 var AUTHORCHECK_MAX_CHARS = 60000; // max. 5 parallele KI-Anfragen, bleibt deutlich unter dem Apps-Script-Zeitlimit
+// Der Termbase-Abgleich braucht keine KI und prueft deshalb das GANZE Dokument
+// (400 Seiten sind ca. 1 Mio. Zeichen); nur Grammatik/Stil/Prompts sind auf AUTHORCHECK_MAX_CHARS begrenzt.
+var AUTHORCHECK_TERM_SCAN_MAX_CHARS = 4000000;
 
 // Teilt Text an Absatz-, sonst Satz-, sonst Wortgrenzen in Stücke <= maxLen.
 function _splitTextIntoChunks_(text, maxLen) {
@@ -274,7 +214,7 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   var apiKey = (props.getProperty('GEMINI_API_KEY') || '').trim();
   if (!apiKey) throw new Error('AI inspection is not configured (Gemini API Key missing).');
 
-  var fullText = apiExtractTextFromCurrentApp(checkScope, AUTHORCHECK_MAX_CHARS + 1);
+  var fullText = apiExtractTextFromCurrentApp(checkScope, AUTHORCHECK_TERM_SCAN_MAX_CHARS);
   if (!fullText || !fullText.trim()) {
     var errMsg = (checkScope === 'selection') ? 'No text selected. Please highlight text first.' : 'No text found in active document.';
     throw new Error(errMsg);
@@ -298,7 +238,6 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
     additionalChecksHeader: 'ADDITIONAL SPECIFIC PROMPTS/CHECKS'
   });
   var glossary = promptParts.glossary;
-  var termListStr = promptParts.termListStr;
   var rulesStr = promptParts.rulesStr;
 
   var rawUrl = props.getProperty('GEMINI_API_URL') || 'https://34-111-99-134.nip.io/gemini/v1beta/models/';
@@ -310,6 +249,10 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   // Funktions-Ersetzungen statt Strings, damit "$&", "$1" usw. in Dokumenttext
   // oder Glossar nicht als Ersetzungsmuster interpretiert werden.
   function buildPrompt(chunkText) {
+    // Nur die Glossar-Eintraege, die in diesem Abschnitt vorkommen: die KI sieht
+    // so eine kurze, passende Liste statt einer gekuerzten Gesamtliste.
+    var chunkTerms = _glossaryForText_(glossary, chunkText).slice(0, GLOSSARY_PROMPT_MAX);
+    var termListStr = chunkTerms.length ? chunkTerms.map(_glossaryLine_).join('\n') : '(no specific entries found for this text)';
     return promptTemplate
       .replace(/\{sourceLang\}/g, function () { return lang; })
       .replace(/\{termList\}/g, function () { return termListStr; })
@@ -345,8 +288,14 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
     return _docPromptResult_(docPrompts[i], res);
   });
 
-  var issues = [];
+  // Termbase-Abgleich ohne KI ueber das ganze Dokument. Die KI-Funde zum selben
+  // Begriff werden danach nicht doppelt aufgenommen.
+  var termIssues = _glossaryFindIssues_(glossary, fullText, _ct_);
+  var termOriginals = {};
+  termIssues.forEach(function (i) { termOriginals[i.original.toLowerCase()] = true; });
+  var issues = termIssues.slice();
   var seen = {};
+  termIssues.forEach(function (i) { seen[i.original + '\u0000' + i.suggestion] = true; });
   var failedParts = 0;
   var firstError = null;
   responses.forEach(function (res, idx) {
@@ -358,6 +307,7 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
       _parseGeminiIssuesResponse_(res, 'AI request failed').forEach(function (issue) {
         var key = issue.original + '\u0000' + issue.suggestion;
         if (seen[key]) return;
+        if (issue.type === 'terminology' && termOriginals[String(issue.original).toLowerCase()]) return;
         seen[key] = true;
         issues.push(issue);
       });
@@ -372,7 +322,7 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   var reports = docReports.length ? _finishDocPromptReports_(docCtx.fileName, docReports, 'reports', docNotes, { language: lang, pageChecks: _docReportPageChecks_(issues) })
     : (docNotes.length ? { url: '', items: [], notes: docNotes } : null);
   var promptIssues = _docPromptAllIssues_(docReports);
-  if (failedParts === responses.length && !(reports && reports.url) && !promptIssues.length) throw firstError;
+  if (failedParts === responses.length && !(reports && reports.url) && !promptIssues.length && !termIssues.length) throw firstError;
   // Befunde der Gesamtdokument-Prompts kommen in dieselbe Liste (Springen, Notiz).
   promptIssues.forEach(function (issue) {
     var key = issue.original + '\u0000' + issue.suggestion;
@@ -386,11 +336,13 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
     if (issue.type !== 'terminology' && issue.type !== 'style' && issue.type !== 'prompt') issue.type = 'grammar';
   });
 
-  logAuditEvent_(getUserEmail_(), 'AUTHOR_CHECK_RUN', 'Found ' + issues.length + ' issue(s), lang=' + lang + ', parts=' + chunks.length + (failedParts ? ', failed=' + failedParts : ''));
+  logAuditEvent_(getUserEmail_(), 'AUTHOR_CHECK_RUN', 'Found ' + issues.length + ' issue(s) (' + termIssues.length + ' termbase), lang=' + lang + ', glossary=' + glossary.length + (promptParts.glossaryPartial ? ' (partial)' : '') + ', parts=' + chunks.length + (failedParts ? ', failed=' + failedParts : ''));
   return {
     issues: issues,
     wordCount: text.trim().split(/\s+/).length,
     glossarySize: glossary.length,
+    glossaryPartial: !!promptParts.glossaryPartial,
+    termIssues: termIssues.length,
     parts: chunks.length,
     failedParts: failedParts,
     truncated: truncated,

@@ -104,7 +104,6 @@ var CARD_I18N = {
     'd.docNoText': 'The PDF ({mb} MB after reduction) is too large for one AI request and contains no readable text (e.g. scanned pages). Please reduce its size (e.g. Acrobat "Reduce File Size") or split it.',
     'd.docNoteLang': 'Custom rules (including whole-document prompts) only apply to check languages with their own rule set (DE, EN, FR, ES, IT, PT, ZH, JA, KO, RU, TR, FI, NO, SV, EL). Checked as {lang}, so these prompts did not run: {names}',
     'd.docNoteOtherLang': 'No whole-document prompt is active for rule language {lang}. These prompts are saved for rule language {other} and did not run: {names}. Import the rule for {lang} as well or check in {other}.',
-    'd.docNoteDisabled': 'Whole-document prompt "{name}" is switched off and did not run.',
     'd.docNotePassage': 'Prompt "{name}" runs "Per passage" (section by section, findings only as a list). For a report across the whole document switch it to "Whole document" in the rules.',
     'd.docNoteMax': '{n} whole-document prompts are active, at most {max} run per check. Not run: {names}',
     'type.grammar': 'Grammar',
@@ -114,7 +113,10 @@ var CARD_I18N = {
     'ann.severity': 'Severity',
     'ann.evidence': 'Evidence',
     'c.suggestion': 'Suggestion',
-    'c.slide': 'Slide {n}'
+    'c.slide': 'Slide {n}',
+    'c.termForbidden': '"{wrong}" is a forbidden term in the termbase. Use: {correct}.',
+    'c.termForbiddenMulti': '"{wrong}" is a forbidden term in the termbase, but it has several meanings. Depending on the meaning use: {correct}.',
+    'c.termCount': 'Occurs {n} times in the checked text.'
   },
   de: {
     'home.subtitle': 'Terminologiesuche & Author Check',
@@ -211,7 +213,6 @@ var CARD_I18N = {
     'd.docNoText': 'Die PDF ({mb} MB nach dem Verkleinern) ist zu groß für eine KI-Anfrage und enthält keinen lesbaren Text (z. B. gescannte Seiten). Bitte verkleinern (z. B. Acrobat „Dateigröße reduzieren“) oder aufteilen.',
     'd.docNoteLang': 'Eigene Regeln (auch Gesamtdokument-Prompts) gelten nur für Prüfsprachen mit eigenem Regelwerk (DE, EN, FR, ES, IT, PT, ZH, JA, KO, RU, TR, FI, NO, SV, EL). Geprüft wurde in {lang}, daher liefen diese Prompts nicht: {names}',
     'd.docNoteOtherLang': 'Für Regelsprache {lang} ist kein Gesamtdokument-Prompt aktiv. Diese Prompts sind unter Regelsprache {other} gespeichert und liefen nicht: {names}. Regel zusätzlich für {lang} importieren oder in {other} prüfen.',
-    'd.docNoteDisabled': 'Der Gesamtdokument-Prompt „{name}“ ist ausgeschaltet und lief nicht.',
     'd.docNotePassage': 'Der Prompt „{name}“ läuft „Pro Abschnitt“ (abschnittsweise, Funde nur als Liste). Für einen Bericht über das ganze Dokument in den Regeln auf „Gesamtdokument“ umstellen.',
     'd.docNoteMax': '{n} Gesamtdokument-Prompts sind aktiv, pro Prüfung laufen höchstens {max}. Nicht gelaufen: {names}',
     'type.grammar': 'Grammatik',
@@ -221,7 +222,10 @@ var CARD_I18N = {
     'ann.severity': 'Schwere',
     'ann.evidence': 'Beleg',
     'c.suggestion': 'Vorschlag',
-    'c.slide': 'Folie {n}'
+    'c.slide': 'Folie {n}',
+    'c.termForbidden': '„{wrong}“ ist in der Termbase ein verbotener Begriff. Besser: {correct}.',
+    'c.termForbiddenMulti': '„{wrong}“ ist in der Termbase ein verbotener Begriff, hat aber mehrere Bedeutungen. Je nach Bedeutung: {correct}.',
+    'c.termCount': 'Kommt {n}-mal im geprüften Text vor.'
   },
   fr: {
     'home.subtitle': 'Recherche terminologique & Author Check',

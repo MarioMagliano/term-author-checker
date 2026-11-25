@@ -675,7 +675,8 @@ function stopLoading(){ if (_loadingInterval) { clearInterval(_loadingInterval);
 // stillschweigend abgeschnitten.
 function checkNoticeHtml(res){
   var parts = [];
-  if (res && res.truncated) parts.push(tl('ac.truncated', { n: Number(res.maxChars || 0).toLocaleString(getUiLang()) }));
+  if (res && res.truncated) parts.push(tl('ac.truncated', { n: Number(res.maxChars || 0).toLocaleString(getUiLang()) }) + ' ' + tl('ac.truncatedTerms'));
+  if (res && res.glossaryPartial) parts.push(tl('ac.glossaryPartial'));
   if (res && res.failedParts) parts.push(tl('ac.failedParts', { failed: res.failedParts, parts: res.parts }));
   var html = parts.length ? '<div class="check-notice">⚠️ ' + parts.join('<br>⚠️ ') + '</div>' : '';
   return html + docReportHtml(res && res.reports);

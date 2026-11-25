@@ -25,6 +25,7 @@ Findet Fehler mit Gemini, korrigiert direkt im Dokument und kommentiert PDFs.
 | `Code.js` | Web-App, Einstellungen, Terminologiesuche |
 | `Homepage.js`, `CardI18n.js` | Startkarte des Add-ons |
 | `Authorcheck.js`, `Rules.js`, `RuleTexts_*.js` | Author Check und Regelwerk |
+| `TermGlossary.js` | Termbase-Glossar: liest die Phrase-Termbases (alle Seiten, fortsetzbar) und gleicht verbotene Begriffe ohne KI mit dem ganzen Dokument ab |
 | `DocPrompts.js` | Prompts, die das ganze Dokument prüfen |
 | `DriveAddon.js`, `DrivePdfPrep.js`, `DrivePdfWeb.js` | PDF-Check in Drive |
 | `PdfAnnotate.js`, `PdfShrink.js`, `PdfInflate.js`, `PdfTextPosition.js`, `PdfAnnotateSearch.js` | PDF-Verarbeitung ohne Fremdbibliothek (reine Funktionen, laufen auch im Browser) |
