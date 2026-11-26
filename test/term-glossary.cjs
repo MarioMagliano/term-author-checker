@@ -126,6 +126,21 @@ const rules = [
 const notes = dp._docPromptNotes_('de', rules);
 check('disabled whole-document prompt: no note', notes.length === 0, JSON.stringify(notes));
 
+// 9. Diagnose: shows how a word is stored and whether it is in the glossary
+reset();
+concepts = [concept([term('Schrubbkopf', 'de', { forbidden: true }), term('Bürstenkopf', 'de', { preferred: true })]),
+            concept([term('Düse', 'de', { forbidden: true }), term('Hochdruckdüse', 'de')])];
+const logs = [];
+ctx.Logger.log = function(x) { logs.push(String(x)); };
+ctx._searchCore_ = function() { return { concepts: [{ categoryLabel: 'General', sourceTerm: { term: 'Bürstenkopf', lang: 'de', status: 'APPROVED', forbidden: false, preferred: true },
+  translations: [{ term: 'Schrubbkopf', lang: 'de', status: 'NEW', forbidden: true, preferred: false }] }], failed: 0 }; };
+ctx._glossaryDiagnose_('Schrubbkopf', 'de');
+check('diagnose: finds the word as forbidden term', logs.some(function(l) { return /Eintrag im Glossar \(falsch\): "Schrubbkopf" -> Bürstenkopf/.test(l); }), logs.join(' // '));
+check('diagnose: shows the Phrase flags', logs.some(function(l) { return /Schrubbkopf \{status=NEW, forbidden=true/.test(l); }));
+logs.length = 0;
+ctx._glossaryDiagnose_('Scheuerkopf', 'de');
+check('diagnose: says clearly when the word is not in the glossary', logs.some(function(l) { return /NICHT als verbotener Begriff/.test(l); }));
+
 const failed = checks.filter(function(c) { return !c; }).length;
 console.log('\n' + (checks.length - failed) + '/' + checks.length + ' passed');
 process.exit(failed ? 1 : 0);

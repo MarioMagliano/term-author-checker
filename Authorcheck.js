@@ -7,8 +7,8 @@ const AUTHORCHECK_DEFAULT_PROMPT =
 'Hochdruckreiniger, Kehrmaschinen, Sauger, Zubehör).\n\n' +
 'Prüfe den folgenden Text (Sprache: {sourceLang}) auf diese Fehlerarten:\n' +
 '1. GRAMMATIK- UND RECHTSCHREIBFEHLER\n' +
-'2. FALSCHE ODER UNEINHEITLICHE KÄRCHER-FACHBEGRIFFE – vergleiche mit dieser Liste ' +
-'"falscher Begriff → korrekter Begriff":\n{termList}\n' +
+'2. FALSCHE ODER UNEINHEITLICHE KÄRCHER-FACHBEGRIFFE, auch Synonyme und Homonyme – prüfe mit diesen Terminologie-Vorgaben ' +
+'(Listen mit "falscher Begriff → korrekter Begriff" und/oder freigegebene Begriffe):\n{termList}\n' +
 '3. SPEZIFISCHE SCHREIB- UND STILREGELN:\n{styleRules}\n\n' +
 'Text:\n"""\n{text}\n"""\n\n' +
 'Antworte AUSSCHLIESSLICH mit validem JSON in exakt dieser Struktur, ohne Markdown-Formatierung, ' +
@@ -248,11 +248,14 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
 
   // Funktions-Ersetzungen statt Strings, damit "$&", "$1" usw. in Dokumenttext
   // oder Glossar nicht als Ersetzungsmuster interpretiert werden.
-  function buildPrompt(chunkText) {
-    // Nur die Glossar-Eintraege, die in diesem Abschnitt vorkommen: die KI sieht
-    // so eine kurze, passende Liste statt einer gekuerzten Gesamtliste.
+  function buildPrompt(chunkText, idx) {
+    // Nur die Glossar-Eintraege, die in diesem Abschnitt vorkommen (verbotene Begriffe,
+    // falls gepflegt) plus die freigegebenen Begriffe, die zu den Fachbegriffen des
+    // Abschnitts passen (Synonyme/Homonyme, siehe TermSynonyms.js).
     var chunkTerms = _glossaryForText_(glossary, chunkText).slice(0, GLOSSARY_PROMPT_MAX);
-    var termListStr = chunkTerms.length ? chunkTerms.map(_glossaryLine_).join('\n') : '(no specific entries found for this text)';
+    var forbiddenPart = chunkTerms.length ? 'FORBIDDEN TERMS (wrong → correct):\n' + chunkTerms.map(_glossaryLine_).join('\n') : '';
+    var approvedPart = (synBlocks[idx] || '');
+    var termListStr = [forbiddenPart, approvedPart].filter(String).join('\n\n') || '(no specific entries found for this text)';
     return promptTemplate
       .replace(/\{sourceLang\}/g, function () { return lang; })
       .replace(/\{termList\}/g, function () { return termListStr; })
@@ -261,15 +264,22 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
   }
 
   var chunks = _splitTextIntoChunks_(text, AUTHORCHECK_CHUNK_CHARS);
+  // Synonyme/Homonyme: freigegebene Begriffe zu den Fachbegriffen jedes Abschnitts
+  // (KI + Termbase-Suche). Fehler hier duerfen die Pruefung nicht stoppen.
+  var synBlocks = [], synInfo = { words: 0, concepts: 0, missing: 0 };
+  try {
+    var synCtx = _synContextForChunks_({ apiUrl: apiUrl, model: model, apiKey: apiKey, temperature: temperature }, lang, chunks);
+    synBlocks = synCtx.blocks; synInfo = synCtx;
+  } catch (synErr) { Logger.log('apiRunAuthorCheck: Synonym-Suche uebersprungen: ' + synErr); }
   // Gesamtdokument-Prompts: eigene Anfragen mit dem ganzen Text, parallel zu den
   // Abschnitten (siehe DocPrompts.gs).
   var docPrompts = promptParts.docPrompts;
   var docCtx = { fileName: _activeFileName_(), text: text, isPdf: false };
   var docCfg = { apiUrl: apiUrl, model: model, apiKey: apiKey, temperature: temperature };
   var docRequests = docPrompts.map(function (dp) { return _docPromptRequest_(docCfg, dp, docCtx, null); });
-  var requests = chunks.map(function (chunk) {
+  var requests = chunks.map(function (chunk, idx) {
     var call = _buildGeminiRequest_(apiUrl, model, apiKey, {
-      contents: [{ role: 'user', parts: [{ text: buildPrompt(chunk) }] }],
+      contents: [{ role: 'user', parts: [{ text: buildPrompt(chunk, idx) }] }],
       generationConfig: { temperature: temperature }
     });
     return {
@@ -336,13 +346,14 @@ function apiRunAuthorCheck(sourceLang, checkScope) {
     if (issue.type !== 'terminology' && issue.type !== 'style' && issue.type !== 'prompt') issue.type = 'grammar';
   });
 
-  logAuditEvent_(getUserEmail_(), 'AUTHOR_CHECK_RUN', 'Found ' + issues.length + ' issue(s) (' + termIssues.length + ' termbase), lang=' + lang + ', glossary=' + glossary.length + (promptParts.glossaryPartial ? ' (partial)' : '') + ', parts=' + chunks.length + (failedParts ? ', failed=' + failedParts : ''));
+  logAuditEvent_(getUserEmail_(), 'AUTHOR_CHECK_RUN', 'Found ' + issues.length + ' issue(s) (' + termIssues.length + ' termbase), lang=' + lang + ', glossary=' + glossary.length + (promptParts.glossaryPartial ? ' (partial)' : '') + ', termContext=' + synInfo.concepts + '/' + synInfo.words + ', parts=' + chunks.length + (failedParts ? ', failed=' + failedParts : ''));
   return {
     issues: issues,
     wordCount: text.trim().split(/\s+/).length,
     glossarySize: glossary.length,
     glossaryPartial: !!promptParts.glossaryPartial,
     termIssues: termIssues.length,
+    termContext: { words: synInfo.words, concepts: synInfo.concepts, missing: synInfo.missing },
     parts: chunks.length,
     failedParts: failedParts,
     truncated: truncated,

@@ -235,3 +235,41 @@ function _buildTerminologyGlossaryInfo_(sourceLang) {
   });
   return { entries: _glossaryMerge_(raw), partial: partial };
 }
+
+// ─── DIAGNOSE ───────────────────────────────────────────────────────────────
+// Im Skript-Editor ausfuehren (Protokoll ansehen): zeigt, ob ein Wort im Glossar
+// steht und wie Phrase es speichert. Wort und Sprache oben in checkGlossaryTerm
+// anpassen. Antwort auf "Warum wird <Wort> nicht gemeldet?":
+//  - "Eintrag im Glossar (falsch)": wird gemeldet.
+//  - Nur als erlaubter Begriff oder gar nicht gefunden: Das Wort ist in der Termbase
+//    nicht als "forbidden" markiert, der Author Check meldet es dann nicht.
+function checkGlossaryTerm() {
+  var WORD = 'Schrubbkopf';
+  var LANG = 'de';
+  _glossaryDiagnose_(WORD, LANG);
+}
+
+function _glossaryDiagnose_(word, lang) {
+  word = String(word || '').trim();
+  var low = word.toLowerCase();
+  var tbs = _getTargetTermbases_();
+  Logger.log('Termbases im Author Check (' + tbs.length + '): ' + tbs.map(function (t) { return t.name + ' [' + (t.langs || []).join(',') + ']'; }).join(' | '));
+  var info = _buildTerminologyGlossaryInfo_(lang);
+  Logger.log('Glossar (' + lang + '): ' + info.entries.length + ' verbotene Begriffe' + (info.partial ? ' - UNVOLLSTAENDIG geladen, Pruefung in einer Minute wiederholen' : ''));
+
+  var asWrong = info.entries.filter(function (e) { return e.wrong.toLowerCase() === low; });
+  var asCorrect = info.entries.filter(function (e) { return e.correct.some(function (c) { return c.toLowerCase() === low; }); });
+  asWrong.forEach(function (e) { Logger.log('Eintrag im Glossar (falsch): "' + e.wrong + '" -> ' + e.correct.join(' / ') + (e.multi ? ' (mehrere Konzepte)' : '')); });
+  asCorrect.slice(0, 5).forEach(function (e) { Logger.log('"' + word + '" ist der richtige Begriff fuer: ' + e.wrong); });
+  if (!asWrong.length) Logger.log('"' + word + '" steht NICHT als verbotener Begriff im Glossar. Ohne gepflegte verbotene Begriffe erkennt die KI Synonyme/Homonyme anhand der freigegebenen Begriffe (TermSynonyms.js).');
+
+  var res = _searchCore_(word, lang, lang);
+  Logger.log('Phrase-Suche nach "' + word + '" (' + lang + '): ' + res.concepts.length + ' Konzept(e)' + (res.failed ? ', ' + res.failed + ' Anfrage(n) fehlgeschlagen' : ''));
+  res.concepts.slice(0, 15).forEach(function (c) {
+    var terms = [c.sourceTerm].concat(c.translations || []).filter(function (t) { return t && _glossaryLangBase_(t.lang) === _glossaryLangBase_(lang); });
+    Logger.log('- [' + c.categoryLabel + '] ' + terms.map(function (t) {
+      return t.term + ' {status=' + t.status + ', forbidden=' + t.forbidden + ', preferred=' + t.preferred + (t.termType ? ', type=' + t.termType : '') + '}';
+    }).join('  ;  '));
+  });
+  if (!res.concepts.length) Logger.log('Kein Konzept mit "' + word + '" in den verwendeten Termbases (siehe Liste oben, evtl. fehlt die Termbase in der Auswahl).');
+}
