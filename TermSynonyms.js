@@ -40,15 +40,18 @@ var SYN_INSTRUCTIONS =
   'Quote the word exactly as it appears in the text.\n';
 
 // ─── SCHRITT 1: FACHBEGRIFFE UND ALTERNATIVEN AUS DEM TEXT ──────────────────
-function _synCandidatePrompt_(lang, chunkText) {
+// chunkText = null: die Seiten liegen als PDF bei (PDF-Pruefung), langName = Sprache der zu pruefenden Texte.
+function _synCandidatePrompt_(lang, chunkText, langName) {
+  var fromPdf = chunkText === null || chunkText === undefined;
   return 'You help check Kärcher texts (manufacturer of cleaning equipment) against the company terminology database.\n' +
-    'Text language: ' + lang + '.\n\n' +
-    'From the text below, list the technical terms and part or product names that a terminology database could contain ' +
+    'Text language: ' + (langName || lang) + '.\n\n' +
+    (fromPdf ? 'From the attached PDF pages, consider ONLY passages written in ' + (langName || lang) + ' and ignore all other languages. List'
+             : 'From the text below, list') + ' the technical terms and part or product names that a terminology database could contain ' +
     '(nouns or short noun phrases of 1 to 3 words, in base form). For each one give up to 2 alternative names for the same thing ' +
     'that could be the official Kärcher term (synonyms), so they can be looked up as well. ' +
     'Skip generic words, brand names, numbers and units. At most 40 terms.\n\n' +
-    'Answer ONLY with valid JSON, without markdown: {"terms":[{"term":"...","alternatives":["..."]}]}\n\n' +
-    'Text:\n"""\n' + String(chunkText || '').replace(/"""/g, "'''") + '\n"""';
+    'Answer ONLY with valid JSON, without markdown: {"terms":[{"term":"...","alternatives":["..."]}]}' +
+    (fromPdf ? '' : '\n\nText:\n"""\n' + String(chunkText).replace(/"""/g, "'''") + '\n"""');
 }
 
 // Antwort -> Liste von Suchwoertern (Begriffe zuerst, dann Alternativen); [] bei Fehler.
@@ -254,4 +257,21 @@ function _synContextForChunks_(cfg, lang, chunks) {
     return block.text;
   });
   return { blocks: blocks, words: all.length, concepts: conceptCount, missing: lookup.missing };
+}
+
+// PDF-Pruefung: dieselbe Suche fuer ein Seitenpaket. Die Seiten gehen als PDF an die KI (Schritt 1),
+// die Woerter werden nachgeschlagen (Schritt 2, gecacht ueber alle Pakete), zurueck kommt der Text fuer
+// den Pruef-Prompt dieses Pakets; '' wenn nichts gefunden wurde. b64: das Paket als Base64.
+function _synContextForPdfPart_(cfg, lang, b64) {
+  var call = _buildGeminiRequest_(cfg.apiUrl, cfg.model, cfg.apiKey, {
+    contents: [{ role: 'user', parts: [
+      { text: _synCandidatePrompt_(lang, null, _drivePdfLanguageName_(lang)) },
+      { inlineData: { mimeType: 'application/pdf', data: b64 } }
+    ] }],
+    generationConfig: { temperature: 0 }
+  });
+  var req = { url: call.url, method: 'post', contentType: 'application/json', headers: call.headers, payload: JSON.stringify(call.body), muteHttpExceptions: true };
+  var words = _synParseCandidates_(_fetchGeminiWithRetry_(req.url, req, 2)).slice(0, SYN_MAX_WORDS);
+  if (!words.length) return '';
+  return _synBlockForWords_(words, _synLookup_(words, lang).byWord).text;
 }

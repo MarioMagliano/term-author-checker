@@ -681,8 +681,8 @@ function _drivePdfPrompt_(job) {
     (job.imagesRemoved ? 'NOTE: To reduce the file size, some large images were removed from this PDF. Empty areas where images used to be are expected - do not report them.\n\n' : '') +
     'Within the ' + targetLanguageName + ' passages, check for these error types:\n' +
     '1. GRAMMAR AND SPELLING ERRORS\n' +
-    '2. INCORRECT OR INCONSISTENT KÄRCHER TERMINOLOGY - compare against this list ' +
-    '"incorrect term -> correct term":\n' + termListStr + '\n' +
+    '2. INCORRECT OR INCONSISTENT KÄRCHER TERMINOLOGY, including synonyms and homonyms - check against these terminology rules ' +
+    '(a list "incorrect term -> correct term" and/or approved termbase terms for the pages):\n' + termListStr + '\n' +
     '3. SPECIFIC WRITING AND STYLE RULES:\n' + rulesStr + '\n\n' +
     'Respond EXCLUSIVELY with valid JSON in exactly this structure, without markdown formatting, without code block:\n' +
     '{"issues":[{"type":"grammar|terminology|style","location":"...","original":"...","suggestion":"...","explanation":"..."}]}\n\n' +

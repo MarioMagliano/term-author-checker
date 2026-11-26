@@ -77,6 +77,9 @@ const DOC_RULES = [
   { name: 'CUSTOM_GEM_2', title: 'Gem 2: Daten', prompt: 'PROMPT-TWO', guide: '' },
   { name: 'CUSTOM_GEM_3', title: 'Gem 3: Werkzeuge', prompt: 'PROMPT-THREE', guide: '' }
 ];
+// Synonym lookup (AI + termbase) has its own test (term-synonyms.cjs); here only how its result reaches the prompt.
+let synBlock = '', synFails = false;
+ctx._synContextForPdfPart_ = function() { if (synFails) throw new Error('Phrase down'); return synBlock; };
 const realDocPromptsFromRules = ctx._docPromptsFromRules_;
 ctx._docPromptsFromRules_ = function() { return DOC_RULES; };
 
@@ -230,6 +233,19 @@ check('export: only known fields, limited length, unknown language -> German',
 check('export: no list -> empty report, no error', (function() { ctx.apiPdfBrowserExportSheet(null, 'x.pdf', 'de'); return sheets[1].issues.length === 0; })());
 ctx.apiPdfBrowserLogRun('Handbuch.pdf', 12, 60, ['5', '6']);
 check('protocol: run is written to the audit log', audit.length === 1 && audit[0][1] === 'DRIVE_PDF_CHECK_RUN' && /12 issue\(s\), 60 part\(s\), browser, failed pages 5,6/.test(audit[0][2]), audit[0] && audit[0][2]);
+
+// ── Synonyms and homonyms in the PDF check ──
+synBlock = 'APPROVED TERMINOLOGY ...\n- Bürstenkopf | meaning: Werkzeugeinheit';
+gemini.answer = okAnswer([]); gemini.code = 200; gemini.fn = null;
+ctx.apiPdfBrowserCheckPart(b64, { language: 'de', from: 0, to: 2, split: false, imagesRemoved: false });
+check('part: approved terms of the pages are added to the prompt', /TERMINOLOGY FOR THESE PAGES/.test(lastText()) && lastText().indexOf('- Bürstenkopf | meaning') !== -1, lastText().slice(0, 120));
+synBlock = '';
+ctx.apiPdfBrowserCheckPart(b64, { language: 'de', from: 0, to: 2, split: false, imagesRemoved: false });
+check('part: no approved terms found, prompt unchanged', lastText().indexOf('TERMINOLOGY FOR THESE PAGES') === -1);
+synFails = true;
+const failRes = ctx.apiPdfBrowserCheckPart(b64, { language: 'de', from: 0, to: 2, split: false, imagesRemoved: false });
+check('part: failing synonym lookup does not stop the check', !failRes.failed && Array.isArray(failRes.issues));
+synFails = false;
 
 // ── Page and Drive button: the add-on opens the browser check as a pop-up and starts it ──
 const FID = 'F'.repeat(33);

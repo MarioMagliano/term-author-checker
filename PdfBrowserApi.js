@@ -117,6 +117,12 @@ function apiPdfBrowserCheckPart(b64, meta) {
   if (!b64 || typeof b64 !== 'string') throw new Error('No PDF data.');
   var cfg = _driveGeminiConfig_();
   var prompt = _pdfBrowserPrompt_(lang, !!meta.imagesRemoved);
+  // Synonyme/Homonyme: freigegebene Begriffe zu den Fachbegriffen dieser Seiten (TermSynonyms.js).
+  // Faellt das aus, wird das Paket wie bisher geprueft.
+  try {
+    var termBlock = _synContextForPdfPart_(cfg, lang, b64);
+    if (termBlock) prompt += '\n\nTERMINOLOGY FOR THESE PAGES (use it for check type 2):\n' + termBlock;
+  } catch (synErr) { Logger.log('apiPdfBrowserCheckPart: Synonym-Suche uebersprungen: ' + synErr); }
   var bytes = Utilities.base64Decode(b64);
   var res;
   try {
