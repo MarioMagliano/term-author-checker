@@ -113,18 +113,20 @@ function onDriveItemsSelected(e) {
   section.addWidget(langSelect);
 
   // "PDF prüfen" öffnet die Browser-Seite als Popup und startet dort die Prüfung
-  // (DrivePdfWeb.js). Nur ohne Web-App-URL (WEBAPP_URL) bleibt der alte schrittweise
-  // Ablauf im Seitenbereich als Notbehelf.
+  // (DrivePdfWeb.js). Ohne Web-App-URL (WEBAPP_URL) gibt es keinen Button, nur den Hinweis.
   var params = { fileId: item.id, fileName: item.title };
-  var hasWindow = !!_drivePdfWebAppUrl_();
   card.addSection(section);
   var choices = CardService.newCardSection();
   choices.addWidget(CardService.newDivider());
-  _cardChoice_(choices, 'fact_check', _ct_('d.checkPdf'), _ct_(hasWindow ? 'd.checkPdfSub' : 'd.checkInPanelSub'),
-    CardService.newAction()
-      .setFunctionName(hasWindow ? 'apiOpenDrivePdfWindow' : 'apiCheckDrivePdf')
-      .setParameters(params)
-      .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  if (_drivePdfWebAppUrl_()) {
+    _cardChoice_(choices, 'fact_check', _ct_('d.checkPdf'), _ct_('d.checkPdfSub'),
+      CardService.newAction()
+        .setFunctionName('apiOpenDrivePdfWindow')
+        .setParameters(params)
+        .setLoadIndicator(CardService.LoadIndicator.SPINNER));
+  } else {
+    choices.addWidget(CardService.newTextParagraph().setText(_ct_('d.noWebApp')));
+  }
   card.addSection(choices);
   return card.build();
 }

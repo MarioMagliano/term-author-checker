@@ -37,11 +37,11 @@ function checkPdfWindowSetup() {
 }
 
 // Card-Action "PDF prüfen": oeffnet die Seite ?page=pdfbrowser als Popup und startet dort
-// sofort die Pruefung der gewaehlten Datei (&start=1). Ohne Web-App-URL: wie bisher
-// schrittweise im Seitenbereich.
+// sofort die Pruefung der gewaehlten Datei (&start=1). Ohne Web-App-URL: Hinweis, kein
+// Ablauf im Seitenbereich mehr.
 function apiOpenDrivePdfWindow(e) {
   var base = _drivePdfWebAppUrl_();
-  if (!base) return apiCheckDrivePdf(e);
+  if (!base) return _drivePdfErrorResponse_(new Error(_ct_('d.noWebApp')));
   var language = (e.formInput && e.formInput.language) || 'de';
   try { PropertiesService.getUserProperties().setProperty(DRIVE_PDF_LAST_LANG_KEY, language); } catch (propErr) {}
   var url = base + '?page=pdfbrowser&fileId=' + encodeURIComponent(e.parameters.fileId) + '&lang=' + encodeURIComponent(language) + '&start=1';
