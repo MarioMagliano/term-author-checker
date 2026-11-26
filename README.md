@@ -26,6 +26,7 @@ Findet Fehler mit Gemini, korrigiert direkt im Dokument und kommentiert PDFs.
 | `Homepage.js`, `CardI18n.js` | Startkarte des Add-ons |
 | `Authorcheck.js`, `Rules.js`, `RuleTexts_*.js` | Author Check und Regelwerk |
 | `TermGlossary.js` | Termbase-Glossar: liest die Phrase-Termbases (alle Seiten, fortsetzbar) und gleicht verbotene Begriffe ohne KI mit dem ganzen Dokument ab |
+| `TermSynonyms.js` | Synonyme und Homonyme: die KI nennt die Fachbegriffe eines Abschnitts samt Alternativnamen, diese werden in den Termbases nachgeschlagen, der Prüf-Prompt bekommt die passenden freigegebenen Begriffe samt Bedeutung (nötig, wenn keine verbotenen Begriffe gepflegt sind) |
 | `DocPrompts.js` | Prompts, die das ganze Dokument prüfen |
 | `DriveAddon.js`, `DrivePdfPrep.js`, `DrivePdfWeb.js` | PDF-Check in Drive |
 | `PdfAnnotate.js`, `PdfShrink.js`, `PdfInflate.js`, `PdfTextPosition.js`, `PdfAnnotateSearch.js` | PDF-Verarbeitung ohne Fremdbibliothek (reine Funktionen, laufen auch im Browser) |
@@ -84,6 +85,20 @@ und lädt von dort per `clasp push` hoch. Das Arbeitsverzeichnis und `main` blei
 Das Add-on läuft derzeit über die Test-Bereitstellung, deshalb dort immer `push-staging.cjs` nehmen.
 Ein normales `clasp push` setzt `@HEAD` wieder auf das normale Logo.
 
+### Eigenes STAGING-Projekt
+
+Wer ein getrenntes STAGING-Apps-Script-Projekt hat, trägt dessen Script-ID lokal ein (die Datei
+steht in `.gitignore` und kommt nicht ins Repo):
+
+```
+{"scriptId": "<Script-ID des STAGING-Projekts>"}
+```
+
+Datei: `.clasp.staging.json` im Projektordner, alternativ die Umgebungsvariable `STAGING_SCRIPT_ID`.
+`node tools/push-staging.cjs` lädt dann in dieses Projekt hoch; `clasp push` geht weiter in das
+Projekt aus `.clasp.json`. Ein neues Projekt hat keine Script Properties: `PHRASE_API_TOKEN`,
+`ALLOWED_TB_UIDS`, `GEMINI_API_KEY` usw. (siehe Einrichtung) müssen dort neu gesetzt werden.
+
 ## Tests
 
 | Befehl | Prüft |
@@ -93,6 +108,8 @@ Ein normales `clasp push` setzt `@HEAD` wieder auf das normale Logo.
 | `node test/rules-page.cjs` | Regel-Popup als eigene Seite (`?page=rules`) im Browser, ohne Docs/Sheets (Playwright nötig) |
 | `node test/browser-api.cjs` | Serverseite der Browser-Prüfung (`PdfBrowserApi.js`) mit Platzhaltern für die Apps-Script-Dienste, echter Gemini-Anfrage- und Antwortcode |
 | `node test/browser-engine.cjs` | PDF-Verarbeitung im Browser (Chromium, Playwright nötig) gegen ein simuliertes Drive, Ergebnis Byte für Byte wie in Apps Script |
+| `node test/term-glossary.cjs` | Termbase-Glossar (verbotene Begriffe, alle Seiten, ganzes Dokument) und Meldungen der Gesamtdokument-Prompts |
+| `node test/term-synonyms.cjs` | Synonym-/Homonym-Prüfung: Fachbegriffe, Nachschlagen in der Termbase, Begriffsliste im Prompt |
 | `node tools/build-pdf-worker.cjs --check` | `PdfWorkerSource.html` ist aktuell |
 | `GeminiTest.js` (im Editor) | Verbindung zu Gemini |
 

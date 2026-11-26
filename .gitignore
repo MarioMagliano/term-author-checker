@@ -1,0 +1,3 @@
+# Lokale Einstellungen (Script-ID des STAGING-Projekts, siehe tools/push-staging.cjs)
+.clasp.staging.json
+node_modules/
