@@ -7,6 +7,14 @@
 //
 //   node tools/push-staging.cjs
 //
+// Eigenes STAGING-Apps-Script-Projekt: Die Script-ID steht in der Umgebungsvariable
+// STAGING_SCRIPT_ID oder in der Datei .clasp.staging.json (nicht im Repo, siehe .gitignore):
+//
+//   {"scriptId": "<ID des STAGING-Projekts>"}
+//
+// Dann geht der Upload in dieses Projekt und nie in das produktive aus .clasp.json.
+// Ohne Angabe wird wie früher in das Projekt aus .clasp.json hochgeladen (mit Warnung).
+//
 // Für die produktive Bereitstellung bleibt alles wie gewohnt: "clasp push" direkt aus dem
 // Repo lädt das normale Logo hoch (assets/logo.png), danach "Deploy → New deployment".
 
@@ -32,29 +40,45 @@ function withStagingLogo(text) {
   return text.split(PROD_LOGO).join(STAGING_LOGO);
 }
 
+// Script-ID des STAGING-Projekts: Umgebungsvariable, sonst .clasp.staging.json, sonst null.
+function stagingScriptId(root, env) {
+  const fromEnv = String((env || process.env).STAGING_SCRIPT_ID || '').trim();
+  if (fromEnv) return fromEnv;
+  const file = path.join(root, '.clasp.staging.json');
+  if (!fs.existsSync(file)) return null;
+  const id = String(JSON.parse(fs.readFileSync(file, 'utf8')).scriptId || '').trim();
+  return id || null;
+}
+
 // Kopiert die Upload-Dateien nach dest und ersetzt dabei das Logo. Gibt die Anzahl der
-// ersetzten Stellen zurück.
-function stage(root, dest) {
+// ersetzten Stellen zurück. scriptId (optional): Zielprojekt statt dem aus .clasp.json.
+function stage(root, dest, scriptId) {
   let replaced = 0;
   for (const f of uploadFiles(root)) {
     const text = fs.readFileSync(path.join(root, f), 'utf8');
     replaced += text.split(PROD_LOGO).length - 1;
     fs.writeFileSync(path.join(dest, f), withStagingLogo(text));
   }
-  fs.copyFileSync(path.join(root, '.clasp.json'), path.join(dest, '.clasp.json'));
+  const clasp = JSON.parse(fs.readFileSync(path.join(root, '.clasp.json'), 'utf8'));
+  if (scriptId) clasp.scriptId = scriptId;
+  fs.writeFileSync(path.join(dest, '.clasp.json'), JSON.stringify(clasp, null, 2));
   return replaced;
 }
 
 function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'termcheck-staging-'));
   try {
-    const replaced = stage(ROOT, tmp);
+    const scriptId = stagingScriptId(ROOT);
+    const replaced = stage(ROOT, tmp, scriptId);
     if (replaced === 0) {
       console.error('Das normale Logo wurde im Manifest nicht gefunden, nichts hochgeladen.');
       process.exitCode = 1;
       return;
     }
-    console.log('Staging-Logo an ' + replaced + ' Stelle(n) eingesetzt. Lade hoch ...');
+    console.log('Staging-Logo an ' + replaced + ' Stelle(n) eingesetzt.');
+    console.log(scriptId
+      ? 'Ziel: STAGING-Projekt ' + scriptId.slice(0, 6) + '...' + scriptId.slice(-4) + '. Lade hoch ...'
+      : 'ACHTUNG: keine STAGING-Script-ID (STAGING_SCRIPT_ID oder .clasp.staging.json), Upload geht in das Projekt aus .clasp.json. Lade hoch ...');
     const r = spawnSync('clasp', ['push', '-f'], { cwd: tmp, stdio: 'inherit', shell: true });
     process.exitCode = r.status === null ? 1 : r.status;
   } finally {
@@ -62,6 +86,6 @@ function main() {
   }
 }
 
-module.exports = { PROD_LOGO, STAGING_LOGO, uploadFiles, withStagingLogo, stage };
+module.exports = { PROD_LOGO, STAGING_LOGO, uploadFiles, withStagingLogo, stage, stagingScriptId };
 
 if (require.main === module) main();

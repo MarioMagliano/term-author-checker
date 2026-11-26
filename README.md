@@ -84,6 +84,20 @@ und lädt von dort per `clasp push` hoch. Das Arbeitsverzeichnis und `main` blei
 Das Add-on läuft derzeit über die Test-Bereitstellung, deshalb dort immer `push-staging.cjs` nehmen.
 Ein normales `clasp push` setzt `@HEAD` wieder auf das normale Logo.
 
+### Eigenes STAGING-Projekt
+
+Wer ein getrenntes STAGING-Apps-Script-Projekt hat, trägt dessen Script-ID lokal ein (die Datei
+steht in `.gitignore` und kommt nicht ins Repo):
+
+```
+{"scriptId": "<Script-ID des STAGING-Projekts>"}
+```
+
+Datei: `.clasp.staging.json` im Projektordner, alternativ die Umgebungsvariable `STAGING_SCRIPT_ID`.
+`node tools/push-staging.cjs` lädt dann in dieses Projekt hoch; `clasp push` geht weiter in das
+Projekt aus `.clasp.json`. Ein neues Projekt hat keine Script Properties: `PHRASE_API_TOKEN`,
+`ALLOWED_TB_UIDS`, `GEMINI_API_KEY` usw. (siehe Einrichtung) müssen dort neu gesetzt werden.
+
 ## Tests
 
 | Befehl | Prüft |

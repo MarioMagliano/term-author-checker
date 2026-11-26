@@ -9,7 +9,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { PROD_LOGO, STAGING_LOGO, uploadFiles, withStagingLogo, stage } = require('../tools/push-staging.cjs');
+const { PROD_LOGO, STAGING_LOGO, uploadFiles, withStagingLogo, stage, stagingScriptId } = require('../tools/push-staging.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const checks = [];
@@ -37,6 +37,27 @@ try {
     uploadFiles(ROOT).every((f) => fs.readFileSync(path.join(ROOT, f), 'utf8') === before[f]));
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// Eigenes STAGING-Projekt: Script-ID aus Umgebungsvariable oder .clasp.staging.json
+const prodId = JSON.parse(fs.readFileSync(path.join(ROOT, '.clasp.json'), 'utf8')).scriptId;
+const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'termcheck-staging-test-'));
+const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), 'termcheck-staging-root-'));
+try {
+  stage(ROOT, tmp2, 'STAGING_ID_123');
+  check('stage setzt die STAGING-Script-ID in .clasp.json (Repo bleibt unverändert)',
+    JSON.parse(fs.readFileSync(path.join(tmp2, '.clasp.json'), 'utf8')).scriptId === 'STAGING_ID_123' &&
+    JSON.parse(fs.readFileSync(path.join(ROOT, '.clasp.json'), 'utf8')).scriptId === prodId);
+  fs.rmSync(tmp2, { recursive: true, force: true }); fs.mkdirSync(tmp2);
+  stage(ROOT, tmp2);
+  check('ohne STAGING-ID bleibt die ID aus .clasp.json', JSON.parse(fs.readFileSync(path.join(tmp2, '.clasp.json'), 'utf8')).scriptId === prodId);
+  check('stagingScriptId: Umgebungsvariable', stagingScriptId(tmp3, { STAGING_SCRIPT_ID: ' abc ' }) === 'abc');
+  check('stagingScriptId: nichts gesetzt', stagingScriptId(tmp3, {}) === null);
+  fs.writeFileSync(path.join(tmp3, '.clasp.staging.json'), '{"scriptId":"fromfile"}');
+  check('stagingScriptId: .clasp.staging.json', stagingScriptId(tmp3, {}) === 'fromfile');
+} finally {
+  fs.rmSync(tmp2, { recursive: true, force: true });
+  fs.rmSync(tmp3, { recursive: true, force: true });
 }
 
 process.exit(checks.every(Boolean) ? 0 : 1);
