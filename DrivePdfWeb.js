@@ -32,25 +32,25 @@ function checkPdfWindowSetup() {
   var raw = PropertiesService.getScriptProperties().getProperty('WEBAPP_URL');
   var url = _drivePdfWebAppUrl_();
   Logger.log('WEBAPP_URL (Skripteigenschaft): ' + (raw || '(nicht gesetzt)'));
-  Logger.log(url ? 'OK: Das PDF-Fenster wird mit dieser Adresse geoeffnet. Test im Browser: ' + url + '?page=pdfcheck'
+  Logger.log(url ? 'OK: Das PDF-Fenster wird mit dieser Adresse geoeffnet. Test im Browser: ' + url + '?page=pdfbrowser'
                  : 'Nicht nutzbar - die Drive-Pruefung laeuft im Seitenbereich (mit "Weiter"). Wert muss eine .../exec-Adresse einer Web-App-Bereitstellung sein.');
 }
 
-// Card-Action "PDF prüfen": oeffnet das PDF-Fenster. Ohne Web-App-URL: wie
-// bisher schrittweise im Seitenbereich.
+// Card-Action "PDF prüfen": oeffnet die Seite ?page=pdfbrowser als Popup und startet dort
+// sofort die Pruefung der gewaehlten Datei (&start=1). Ohne Web-App-URL: wie bisher
+// schrittweise im Seitenbereich.
 function apiOpenDrivePdfWindow(e) {
   var base = _drivePdfWebAppUrl_();
   if (!base) return apiCheckDrivePdf(e);
   var language = (e.formInput && e.formInput.language) || 'de';
   try { PropertiesService.getUserProperties().setProperty(DRIVE_PDF_LAST_LANG_KEY, language); } catch (propErr) {}
-  var url = base + '?page=pdfcheck&fileId=' + encodeURIComponent(e.parameters.fileId) + '&lang=' + encodeURIComponent(language);
+  var url = base + '?page=pdfbrowser&fileId=' + encodeURIComponent(e.parameters.fileId) + '&lang=' + encodeURIComponent(language) + '&start=1';
   return CardService.newActionResponseBuilder()
     .setOpenLink(CardService.newOpenLink()
       .setUrl(url)
-      // Eigener, voller Tab statt kleinem Overlay-Fenster: Verlauf, Filter und
-      // Fehlerliste haben so genug Platz. Das Ergebnis bietet der Seitenbereich
-      // beim naechsten Oeffnen der Datei unter "Letzte Pruefung" an.
-      .setOpenAs(CardService.OpenAs.FULL_SIZE))
+      // Popup-Fenster: die Pruefung laeuft in der Seite selbst (Ergebnisliste, kommentierte
+      // PDF und Sheet gibt es dort), im Drive-Seitenbereich bleibt nichts offen.
+      .setOpenAs(CardService.OpenAs.OVERLAY))
     .build();
 }
 

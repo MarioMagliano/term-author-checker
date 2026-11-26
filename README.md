@@ -30,7 +30,7 @@ Findet Fehler mit Gemini, korrigiert direkt im Dokument und kommentiert PDFs.
 | `DocPrompts.js` | Prompts, die das ganze Dokument prüfen |
 | `DriveAddon.js`, `DrivePdfPrep.js`, `DrivePdfWeb.js` | PDF-Check in Drive |
 | `PdfAnnotate.js`, `PdfShrink.js`, `PdfInflate.js`, `PdfTextPosition.js`, `PdfAnnotateSearch.js` | PDF-Verarbeitung ohne Fremdbibliothek (reine Funktionen, laufen auch im Browser) |
-| `PdfBrowserApi.js`, `PdfBrowser.html`, `PdfBrowserClient.html`, `PdfWorkerSource.html` | PDF im Browser lesen (Prototyp, siehe unten) |
+| `PdfBrowserApi.js`, `PdfBrowser.html`, `PdfBrowserClient.html`, `PdfWorkerSource.html` | PDF-Check im Browser, öffnet sich als Popup aus Drive (siehe unten) |
 | `Folders.js` | Ordnerstruktur „Kärcher TermCheck“ im eigenen Drive |
 | `*.html` | Oberflächen (Sidebar, Author Check, Terminologiesuche, PDF-Check) |
 | `test/`, `tools/` | Node-Tests und Build-Skript für die PDF-Verarbeitung (nicht von clasp hochgeladen) |
@@ -139,18 +139,19 @@ Set the Script Properties listed under *Einrichtung*. At minimum: `ADMIN_EMAILS`
 
 Use **Deploy → New deployment** (Add-on and Web app) and update both after each `clasp push`.
 
-## PDF im Browser (Prototyp)
+## PDF-Check im Browser
 
 Sehr große PDFs (200 MB, 3000 Seiten) scheitern in Apps Script an Speicher und Laufzeit, schon beim Öffnen.
-Der Prototyp verlagert die PDF-Arbeit in den Browser: Ein Web Worker liest die Datei stückweise per
+Der PDF-Check verlagert die PDF-Arbeit in den Browser: Ein Web Worker liest die Datei stückweise per
 HTTP-Range direkt aus Drive (mit dem eigenen Token der Person), sortiert Bilder aus, teilt sie in Prüfpakete und
 baut am Ende den Kommentar-Anhang. Die Kommentare kommen als Incremental Update an das unveränderte Original,
 die Bilder werden nicht heruntergerechnet. Die PDF geht nie durch Apps Script; dorthin gehen nur die kleinen
 Prüfpakete (Bilder bis 12 MB je Datei behalten, höchstens 60 Pakete) für Prompt, Regeln und Gemini.
 
-- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de&parallel=8`; `parallel` = Pakete gleichzeitig bei Gemini, 1 bis 12, Standard 6). Datei und Sprache wählen,
-  „Mit Gemini prüfen". Ergebnisliste, „Kommentierte PDF erzeugen" (Download) und „Als Sheet exportieren".
-  Mit vorbefülltem Link startet nichts von allein, weil eine Prüfung Gemini-Anfragen kostet.
+- **Seite:** `<Web-App-URL>?page=pdfbrowser` (optional `&fileId=...&lang=de&parallel=8`; `parallel` = Pakete gleichzeitig bei Gemini, 1 bis 12, Standard 6). Die Oberfläche ist englisch. Datei und Sprache wählen,
+  „Check PDF". Ergebnisliste, „Create commented PDF" (Download) und „Export as Sheet".
+  Ein Link mit `&fileId=...` startet nichts von allein, weil eine Prüfung Gemini-Anfragen kostet. `&debug=1` blendet die Diagnose-Werkzeuge ein.
+- **Aus Drive:** Im Drive-Add-on öffnet „Check PDF" diese Seite als Popup mit der gewählten Datei und der gewählten Sprache und startet die Prüfung sofort (`&start=1`). Voraussetzung ist die Skripteigenschaft `WEBAPP_URL` (Adresse der Web-App-Bereitstellung, `.../exec`); ohne sie läuft die Prüfung wie früher schrittweise im Seitenbereich. Nach Code-Änderungen die Bereitstellung auf eine neue Version setzen.
 - **Ablauf:** Datei öffnen → in Pakete teilen → bis zu 6 Pakete gleichzeitig an `apiPdfBrowserCheckPart` (je 3 Versuche;
   scheitert ein Paket, wird es Seite für Seite wiederholt, Seiten ohne Ergebnis werden gemeldet) → Funde ohne
   Doppelte zusammenführen → Protokoll (`DRIVE_PDF_CHECK_RUN`, mit dem Zusatz „browser").

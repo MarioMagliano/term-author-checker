@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <base target="_top">
 <meta charset="UTF-8">
@@ -39,18 +39,17 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 </head>
 <body>
 <div id="app">
-  <h1>PDF-Check im Browser (Prototyp)</h1>
-  <p class="lead">Für große PDFs. Der Browser liest die Datei selbst stückweise aus Drive (mit deinem eigenen Zugang), teilt sie in Pakete und lässt diese von Gemini prüfen. Die Kommentare kommen lokal ans unveränderte Original, die Bilder werden nicht heruntergerechnet und die PDF läuft nicht durch Apps Script.</p>
+  <h1>PDF check</h1>
 
   <div class="box">
-    <h2>1 · Prüfen</h2>
+    <h2>Check</h2>
     <div class="row">
-      <div><label for="file">Drive-Datei (Link oder ID)</label>
+      <div><label for="file">Drive file (link or ID)</label>
         <input type="text" id="file" value="<?= fileId ?>" placeholder="https://drive.google.com/file/d/…"></div>
-      <div class="narrow"><label for="lang">Sprache der zu prüfenden Texte</label><select id="lang"></select></div>
+      <div class="narrow"><label for="lang">Language of the text to check</label><select id="lang"></select></div>
     </div>
-    <button id="checkBtn">Mit Gemini prüfen</button>
-    <button id="readBtn" class="sec">Nur lesen (Diagnose)</button>
+    <button id="checkBtn">Check PDF</button>
+    <button id="readBtn" class="sec" style="display:none">Read only (diagnostics)</button>
     <div class="bar"><i id="bar"></i></div>
     <table id="steps"></table>
     <div class="msg" id="msg"></div>
@@ -58,11 +57,11 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   </div>
 
   <div class="box" id="resBox" style="display:none">
-    <h2>2 · Ergebnis</h2>
+    <h2>Result</h2>
     <div class="chips" id="chips"></div>
     <div id="docReport"></div>
-    <button id="annBtn">Kommentierte PDF erzeugen</button>
-    <button id="sheetBtn" class="sec">Als Sheet exportieren</button>
+    <button id="annBtn">Create commented PDF</button>
+    <button id="sheetBtn" class="sec">Export as Sheet</button>
     <div class="msg" id="annMsg"></div>
     <div id="dl"></div>
     <table id="issues"></table>
@@ -70,14 +69,14 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 
   <div class="box" id="diagBox" style="display:none">
     <details>
-      <summary>Diagnose: Probe-Kommentar setzen</summary>
-      <label for="quote">Text, der markiert werden soll (wörtlich aus der PDF)</label>
-      <input type="text" id="quote" placeholder="z. B. ein Satzanfang von Seite 1">
+      <summary>Diagnostics: add a test comment</summary>
+      <label for="quote">Text to mark (exactly as in the PDF)</label>
+      <input type="text" id="quote" placeholder="e.g. the start of a sentence on page 1">
       <div class="row">
-        <div><label for="pageNo">Seite</label><input type="number" id="pageNo" value="1" min="1"></div>
-        <div><label for="note">Kommentar</label><input type="text" id="note" value="Testkommentar (Browser-Prototyp)"></div>
+        <div><label for="pageNo">Page</label><input type="number" id="pageNo" value="1" min="1"></div>
+        <div><label for="note">Comment</label><input type="text" id="note" value="Test comment"></div>
       </div>
-      <button id="probeBtn">Kommentar setzen und PDF erzeugen</button>
+      <button id="probeBtn">Add comment and create PDF</button>
       <div class="msg" id="probeMsg"></div>
       <div id="probeDl"></div>
     </details>
@@ -90,17 +89,19 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 (function() {
   var LANGS = <?!= JSON.stringify(languages) ?>;
   var LAST_LANG = <?!= JSON.stringify(lastLang) ?>;
+  var AUTO_START = <?!= JSON.stringify(autoStart) ?>;   // vom Drive-Add-on geöffnet: Prüfung startet sofort
+  var DEBUG = <?!= JSON.stringify(debug) ?>;           // &debug=1: Diagnose-Werkzeuge einblenden
   var PARALLEL = <?!= JSON.stringify(parallel) ?>;   // Pakete gleichzeitig bei Gemini (Link: &parallel=1..12, Standard 6)
   var RETRY_MS = window.PDF_BROWSER_RETRY_MS || 1500;   // Wartezeit vor einem neuen Versuch (Tests verkürzen sie)
   var IMAGE_BUDGET = 12 * 1024 * 1024;   // wie DRIVE_PDF_IMAGE_BUDGET: so viele Bildbytes bleiben bei großen PDFs
 
   var pdf = null, info = null, opened = null, issues = [], failed = [], steps = [];
   var seen = {}, docReportUrl = '', docRun = null, activeCats = {}, catOrder = [], catCounts = {}, resultMeta = null;
-  var TYPE_LABELS = { terminology: 'Terminologie', grammar: 'Grammatik', spelling: 'Rechtschreibung', style: 'Stil', prompt: 'Prompt' };
+  var TYPE_LABELS = { terminology: 'Terminology', grammar: 'Grammar', spelling: 'Spelling', style: 'Style', prompt: 'Custom prompt' };
   var el = function(id) { return document.getElementById(id); };
 
-  function mb(n) { return (Math.round(n / 1048576 * 10) / 10).toLocaleString('de-DE') + ' MB'; }
-  function sec(ms) { return (Math.round(ms / 100) / 10).toLocaleString('de-DE') + ' s'; }
+  function mb(n) { return (Math.round(n / 1048576 * 10) / 10).toLocaleString('en-US') + ' MB'; }
+  function sec(ms) { return (Math.round(ms / 100) / 10).toLocaleString('en-US') + ' s'; }
   function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
   function esc(t) { return String(t === undefined || t === null ? '' : t).replace(/[&<>"']/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function bar(p) { el('bar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
@@ -130,7 +131,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   function update(s, value, note) { s.value = value; if (note !== undefined) s.note = note; render(); }
   function fail(s, err) {
     s.state = 'bad'; s.note = String(err && err.message || err); render();
-    el('msg').className = 'msg bad'; el('msg').textContent = s.label + ' hat nicht funktioniert: ' + s.note;
+    el('msg').className = 'msg bad'; el('msg').textContent = s.label + ' failed: ' + s.note;
   }
   function busy(on) {
     ['checkBtn', 'readBtn', 'annBtn', 'sheetBtn', 'probeBtn'].forEach(function(id) { el(id).disabled = on; });
@@ -149,36 +150,35 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 
   // Gemeinsamer Anfang: Datei prüfen, Worker starten, PDF lesen.
   async function openFile(imageBudgetFor) {
-    var s = step('Datei prüfen, Regeln und Drive-Zugang holen');
+    var s = step('Checking file and rules');
     try { info = await server('apiPdfBrowserPrepare', el('file').value, el('lang').value); done(s, mb(info.size), info.name); }
     catch (e) { fail(s, e); return false; }
     bar(5);
     if (info.docPromptsSkipped && info.docPromptsSkipped.length) {
-      note(info.docPromptsSkipped.length + ' Gesamtdokument-Prompt(s) laufen nicht, weil höchstens ' + info.docPromptMax + ' gleichzeitig laufen: ' +
-        info.docPromptsSkipped.join(', ') + '. Schalte andere Prompts aus oder erhöhe die Skripteigenschaft DOC_PROMPT_MAX (bis 12).');
+      note(info.docPromptsSkipped.length + ' whole-document prompt(s) did not run because at most ' + info.docPromptMax + ' run per check: ' +
+        info.docPromptsSkipped.join(', ') + '.');
     }
-    s = step('Worker im Browser starten');
+    s = step('Starting the PDF reader');
     try { pdf = PdfBrowser.create(); done(s, 'ok'); } catch (e) { fail(s, e); return false; }
 
-    s = step('Direkt von Drive lesen (Range-Anfrage aus dem Browser)');
+    s = step('Reading the file from Drive');
     try {
       var r = await fetch(PdfBrowser.driveUrl(info.fileId), { cache: 'no-store', headers: { Authorization: 'Bearer ' + info.token, Range: 'bytes=0-7' } });
       var head = new Uint8Array(await r.arrayBuffer());
       var magic = String.fromCharCode.apply(null, head.subarray(0, 5));
       if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
-      if (magic !== '%PDF-') throw new Error('Kein PDF-Anfang gelesen (' + magic + ').');
+      if (magic !== '%PDF-') throw new Error('This does not look like a PDF (' + magic + ').');
       done(s, 'HTTP ' + r.status);
     } catch (e) { fail(s, e); return false; }
     bar(10);
 
-    s = step('PDF öffnen (Struktur lesen, Bilder aussortieren)');
+    s = step('Opening the PDF');
     try {
       opened = await pdf.open({ fileId: info.fileId, token: info.token, size: info.size, imageBudget: imageBudgetFor(info) }, function(p) {
         var f = p.done / Math.max(1, p.total);
         bar(10 + (p.step === 0 ? Math.round(18 * f) : 18 + Math.round(2 * f)));
       });
-      done(s, sec(opened.ms), opened.pages.toLocaleString('de-DE') + ' Seiten · ' + mb(opened.downloadedBytes) + ' gelesen in ' +
-        opened.requests + ' Anfragen · Bilder behalten ' + opened.imagesKept + ', entfernt ' + opened.imagesRemoved);
+      done(s, sec(opened.ms), opened.pages.toLocaleString('en-US') + ' pages');
     } catch (e) { fail(s, e); return false; }
     bar(30);
     return true;
@@ -199,7 +199,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   async function runDocPrompts(plan) {
     var titles = info.docPromptTitles || [];
     if (!titles.length) return;
-    var s = step('Gesamtdokument-Prompts');
+    var s = step('Whole-document prompts');
     try {
       var mode = opened.shrunkBytes <= (info.docMaxBytes || 13 * 1024 * 1024) ? 'pdf' : 'text';
       var reports = new Array(titles.length), all = titles.map(function(t, i) { return i; });
@@ -214,30 +214,30 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
       try { await attempt(mode, all); } catch (e) { /* alle Prompts dieses Versuchs gelten als nicht gelaufen */ }
       var bad = badOnes();
       if (bad.length) {
-        update(s, (titles.length - bad.length) + ' / ' + titles.length, bad.length + ' Prompt(s) laufen noch einmal mit dem Seitentext');
+        update(s, (titles.length - bad.length) + ' / ' + titles.length, 'Retrying ' + bad.length + ' prompt(s)');
         await sleep(RETRY_MS);
         try { await attempt('text', bad); } catch (e) { /* bleibt fehlgeschlagen */ }
         bad = badOnes();
       }
       reports.forEach(function(r) { if (r && !r.error) addIssues(r.issues); });
       // Der Bericht (Google Doc) entsteht am Ende des Laufs, wenn auch die Zahlen der Seitenprüfung feststehen.
-      docRun = { reports: reports.map(function(r, i) { return r || { title: titles[i], error: 'keine Antwort' }; }) };
+      docRun = { reports: reports.map(function(r, i) { return r || { title: titles[i], error: 'no answer' }; }) };
       bad.forEach(function(i) {
-        note('Gesamtdokument-Prompt „' + titles[i] + '" ist fehlgeschlagen: ' + String((reports[i] && reports[i].error) || 'keine Antwort').replace(/[.\s]+$/, '') + '.');
+        note('The whole-document prompt "' + titles[i] + '" failed: ' + String((reports[i] && reports[i].error) || 'no answer').replace(/[.\s]+$/, '') + '.');
       });
       done(s, (titles.length - bad.length) + ' / ' + titles.length,
-        reports.reduce(function(n, r) { return n + (r && !r.error && r.issues ? r.issues.length : 0); }, 0) + ' Funde');
+        reports.reduce(function(n, r) { return n + (r && !r.error && r.issues ? r.issues.length : 0); }, 0) + ' findings');
     } catch (e) {
-      done(s, '–', 'Nicht gelaufen: ' + String(e && e.message || e));
+      done(s, '–', 'Did not run: ' + String(e && e.message || e));
     }
   }
 
   async function checkAll(plan) {
     var ranges = plan.ranges, doneParts = 0, next = 0;
     var imagesRemoved = opened.imagesRemoved > 0;
-    var s = step('Mit Gemini prüfen');
+    var s = step('Checking the text');
     function progress() {
-      update(s, doneParts + ' / ' + ranges.length, issues.length + ' Funde' + (failed.length ? ' · Seiten ohne Ergebnis: ' + failed.join(', ') : ''));
+      update(s, doneParts + ' / ' + ranges.length, issues.length + ' findings' + (failed.length ? ' · pages without result: ' + failed.join(', ') : ''));
       bar(30 + Math.round(68 * doneParts / Math.max(1, ranges.length)));
     }
     var add = addIssues;
@@ -274,8 +274,8 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     for (var k = 0; k < Math.min(PARALLEL, ranges.length); k++) lanes.push(lane());
     try { await Promise.all(lanes); }
     catch (e) { fail(s, e); return false; }
-    if (failed.length === plan.pages && !issues.length) { fail(s, new Error('Die KI-Anfrage ist für alle Seiten fehlgeschlagen. Bitte noch einmal versuchen.')); return false; }
-    done(s, ranges.length + ' / ' + ranges.length, issues.length + ' Funde' + (failed.length ? ' · Seiten ohne Ergebnis: ' + failed.join(', ') : ''));
+    if (failed.length === plan.pages && !issues.length) { fail(s, new Error('The check failed for all pages. Please try again.')); return false; }
+    done(s, ranges.length + ' / ' + ranges.length, issues.length + ' findings' + (failed.length ? ' · pages without result: ' + failed.join(', ') : ''));
     return true;
   }
 
@@ -313,26 +313,26 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   function renderChips() {
     var box = el('chips'); box.innerHTML = '';
     var n = selected().length, allOn = catOrder.every(function(c) { return activeCats[c]; });
-    box.appendChild(chipEl('<b>' + n + '</b>' + (n === issues.length ? '' : ' von <b>' + issues.length + '</b>') + ' Funde', '', null));
+    box.appendChild(chipEl('<b>' + n + '</b>' + (n === issues.length ? '' : ' of <b>' + issues.length + '</b>') + ' findings', '', null));
     catOrder.forEach(function(c) {
       var chip = chipEl(esc(catLabel(c)) + ' <b>' + catCounts[c] + '</b>', 'tog ' + (activeCats[c] ? 'on' : 'off'), function() { activeCats[c] = !activeCats[c]; refreshResult(); });
       chip.setAttribute('data-cat', c); chip.setAttribute('aria-pressed', activeCats[c] ? 'true' : 'false');
       box.appendChild(chip);
     });
     if (!allOn) {
-      var all = chipEl('alle anzeigen', 'all', function() { catOrder.forEach(function(c) { activeCats[c] = true; }); refreshResult(); });
+      var all = chipEl('show all', 'all', function() { catOrder.forEach(function(c) { activeCats[c] = true; }); refreshResult(); });
       all.id = 'chipAll'; box.appendChild(all);
     }
     if (resultMeta) {
-      box.appendChild(chipEl('<b>' + resultMeta.plan.pages.toLocaleString('de-DE') + '</b> Seiten · ' + resultMeta.plan.ranges.length + ' Pakete · ' + sec(resultMeta.ms), '', null));
+      box.appendChild(chipEl('<b>' + resultMeta.plan.pages.toLocaleString('en-US') + '</b> pages · ' + sec(resultMeta.ms), '', null));
     }
-    if (failed.length) box.appendChild(chipEl('ohne Ergebnis: Seite ' + esc(failed.join(', ')), 'bad', null));
+    if (failed.length) box.appendChild(chipEl('no result: page ' + esc(failed.join(', ')), 'bad', null));
   }
 
   function renderList() {
     var list = selected();
     var tb = el('issues');
-    tb.innerHTML = '<tr><th>Typ</th><th>Stelle</th><th>Original → Vorschlag</th></tr>';
+    tb.innerHTML = '<tr><th>Type</th><th>Location</th><th>Original → Suggestion</th></tr>';
     list.slice(0, 300).forEach(function(i) {
       var tr = document.createElement('tr'), t = document.createElement('td'), l = document.createElement('td'), c = document.createElement('td');
       t.className = 't'; t.textContent = catLabel(catOf(i)) + (i.severity ? ' · ' + i.severity : '');
@@ -341,17 +341,17 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
       del.textContent = i.original; ins.textContent = i.suggestion;
       c.appendChild(del); c.appendChild(document.createTextNode(' → ')); c.appendChild(ins);
       if (i.explanation) { var ex = document.createElement('div'); ex.className = 'loc'; ex.textContent = i.explanation; c.appendChild(ex); }
-      if (i.evidence) { var ev = document.createElement('div'); ev.className = 'loc'; ev.textContent = 'Beleg: ' + i.evidence; c.appendChild(ev); }
+      if (i.evidence) { var ev = document.createElement('div'); ev.className = 'loc'; ev.textContent = 'Evidence: ' + i.evidence; c.appendChild(ev); }
       tr.appendChild(t); tr.appendChild(l); tr.appendChild(c); tb.appendChild(tr);
     });
-    if (list.length > 300) { var tr2 = document.createElement('tr'), td2 = document.createElement('td'); td2.colSpan = 3; td2.className = 'loc'; td2.textContent = '… und ' + (list.length - 300) + ' weitere (in der kommentierten PDF und im Sheet).'; tr2.appendChild(td2); tb.appendChild(tr2); }
+    if (list.length > 300) { var tr2 = document.createElement('tr'), td2 = document.createElement('td'); td2.colSpan = 3; td2.className = 'loc'; td2.textContent = '… and ' + (list.length - 300) + ' more (in the commented PDF and the Sheet).'; tr2.appendChild(td2); tb.appendChild(tr2); }
   }
 
   // Die Knöpfe arbeiten mit der gefilterten Auswahl; die Zahl steht im Knopf.
   function updateButtons() {
     var n = selected().length;
-    el('annBtn').textContent = 'Kommentierte PDF erzeugen (' + n + ')';
-    el('sheetBtn').textContent = 'Als Sheet exportieren (' + n + ')';
+    el('annBtn').textContent = 'Create commented PDF (' + n + ')';
+    el('sheetBtn').textContent = 'Export as Sheet (' + n + ')';
     if (!el('checkBtn').disabled) { el('annBtn').disabled = n === 0; el('sheetBtn').disabled = n === 0; }
   }
 
@@ -379,14 +379,14 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   }
 
   function showResult(plan, ms) {
-    el('resBox').style.display = ''; el('diagBox').style.display = '';
+    el('resBox').style.display = ''; el('diagBox').style.display = DEBUG ? '' : 'none';
     resultMeta = { plan: plan, ms: ms };
     buildCategories();
     el('docReport').innerHTML = '';
     if (docReportUrl) {
       var a = document.createElement('a'); a.href = docReportUrl; a.target = '_blank'; a.id = 'docReportLink'; a.className = 'loc';
       a.style.cssText = 'display:inline-block;margin:0 0 10px;font-size:13px;font-weight:600;';
-      a.textContent = 'Bericht der Gesamtdokument-Prompts öffnen';
+      a.textContent = 'Open the report of the whole-document prompts';
       el('docReport').appendChild(a);
     }
     refreshResult();
@@ -397,9 +397,9 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     var t0 = Date.now();
     try {
       if (!(await openFile(function(inf) { return inf.size <= inf.maxBytes ? Infinity : IMAGE_BUDGET; }))) { busy(false); return; }
-      var s = step('Seiten in Pakete teilen');
+      var s = step('Splitting into parts');
       var plan;
-      try { plan = await pdf.plan({ pagesPerPart: 4, maxParts: 60 }); done(s, plan.ranges.length + ' Pakete', plan.pages.toLocaleString('de-DE') + ' Seiten'); }
+      try { plan = await pdf.plan({ pagesPerPart: 4, maxParts: 60 }); done(s, plan.ranges.length + ' parts', plan.pages.toLocaleString('en-US') + ' pages'); }
       catch (e) { fail(s, e); busy(false); return; }
       var pagesP = checkAll(plan), docP = runDocPrompts(plan);
       var pagesOk = await pagesP; await docP;
@@ -407,7 +407,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
       await makeDocReport(plan);
       bar(100);
       showResult(plan, Date.now() - t0);
-      el('msg').textContent = 'Fertig.';
+      el('msg').textContent = 'Done.';
       try { await server('apiPdfBrowserLogRun', info.name, issues.length, plan.ranges.length, failed); } catch (e) { /* Protokoll ist nicht kritisch */ }
     } catch (e) { el('msg').className = 'msg bad'; el('msg').textContent = String(e && e.message || e); }
     busy(false);
@@ -416,7 +416,7 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   el('readBtn').onclick = async function() {
     busy(true); reset();
     if (await openFile(function() { return 0; })) {
-      el('msg').textContent = 'Fertig gelesen. Unter „Diagnose" kannst du einen Probe-Kommentar setzen.';
+      el('msg').textContent = 'File read. Use "Diagnostics" to add a test comment.';
       el('diagBox').style.display = '';
       el('diagBox').querySelector('details').open = true;
     }
@@ -428,17 +428,17 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
     link.className = 'dl'; link.id = into === 'dl' ? 'dlLink' : 'probeLink';
     link.href = URL.createObjectURL(blob);
     link.download = info.name.replace(/\.pdf$/i, '') + ' (annotated).pdf';
-    link.textContent = 'Kommentierte PDF herunterladen';
+    link.textContent = 'Download commented PDF';
     el(into).innerHTML = ''; el(into).appendChild(link);
   }
 
   async function annotate(list, msgId, into) {
-    busy(true); el(msgId).className = 'msg'; el(msgId).textContent = 'Suche Fundstellen …'; el(into).innerHTML = '';
+    busy(true); el(msgId).className = 'msg'; el(msgId).textContent = 'Locating the passages …'; el(into).innerHTML = '';
     try {
-      var r = await pdf.annotate(list, info.labels, function(p) { el(msgId).textContent = 'Suche Fundstellen … ' + p.next + ' von ' + (p.count || 1); });
-      el(msgId).textContent = r.positioned + ' von ' + r.count + ' Stellen genau markiert. Setze die Datei zusammen …';
-      var blob = await pdf.annotatedBlob(r.appendix, function(p) { el(msgId).textContent = 'Lade das Original … ' + Math.round(100 * p.done / p.total) + ' %'; });
-      el(msgId).textContent = r.positioned + ' von ' + r.count + ' Stellen genau markiert' + (r.total > r.count ? ' (nur die ersten ' + r.count + ' von ' + r.total + ' Funden)' : '') + ' · ' + mb(blob.size);
+      var r = await pdf.annotate(list, info.labels, function(p) { el(msgId).textContent = 'Locating the passages … ' + p.next + ' of ' + (p.count || 1); });
+      el(msgId).textContent = r.positioned + ' of ' + r.count + ' passages marked exactly. Building the file …';
+      var blob = await pdf.annotatedBlob(r.appendix, function(p) { el(msgId).textContent = 'Loading the original … ' + Math.round(100 * p.done / p.total) + ' %'; });
+      el(msgId).textContent = r.positioned + ' of ' + r.count + ' passages marked exactly' + (r.total > r.count ? ' (only the first ' + r.count + ' of ' + r.total + ' findings)' : '') + ' · ' + mb(blob.size);
       download(blob, into);
     } catch (e) { el(msgId).className = 'msg bad'; el(msgId).textContent = String(e && e.message || e); }
     busy(false);
@@ -447,10 +447,10 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
   el('annBtn').onclick = function() { annotate(selected(), 'annMsg', 'dl'); };
 
   el('sheetBtn').onclick = async function() {
-    busy(true); el('annMsg').className = 'msg'; el('annMsg').textContent = 'Erstelle das Sheet …';
+    busy(true); el('annMsg').className = 'msg'; el('annMsg').textContent = 'Creating the Sheet …';
     try {
       var url = await server('apiPdfBrowserExportSheet', selected(), info.name, info.language);
-      el('annMsg').innerHTML = ''; var a = document.createElement('a'); a.href = url; a.target = '_blank'; a.textContent = 'Sheet öffnen'; a.id = 'sheetLink';
+      el('annMsg').innerHTML = ''; var a = document.createElement('a'); a.href = url; a.target = '_blank'; a.textContent = 'Open Sheet'; a.id = 'sheetLink';
       el('annMsg').appendChild(a);
     } catch (e) { el('annMsg').className = 'msg bad'; el('annMsg').textContent = String(e && e.message || e); }
     busy(false);
@@ -458,11 +458,14 @@ details summary{ cursor:pointer; font-size:13px; font-weight:700; text-transform
 
   el('probeBtn').onclick = function() {
     var quote = el('quote').value.trim();
-    annotate([{ type: 'style', original: quote || '(Testkommentar)', suggestion: el('note').value, explanation: 'Browser-Prototyp',
+    annotate([{ type: 'style', original: quote || '(test comment)', suggestion: el('note').value, explanation: 'Test comment',
                 location: 'Page ' + (parseInt(el('pageNo').value, 10) || 1) }], 'probeMsg', 'probeDl');
   };
 
-  // Mit vorbefülltem Link (?fileId=...) wird nichts gestartet: eine Prüfung kostet Gemini-Anfragen.
+  // Ein Link mit ?fileId=... startet nichts von allein (eine Prüfung kostet Gemini-Anfragen).
+  // Nur der Button im Drive-Add-on hängt &start=1 an: dort hat die Person die Prüfung gerade selbst ausgelöst.
+  if (DEBUG) el('readBtn').style.display = '';
+  if (AUTO_START && el('file').value.trim()) el('checkBtn').click();
 })();
 </script>
 </body>

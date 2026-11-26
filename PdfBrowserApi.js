@@ -1,5 +1,5 @@
 // ============================================================================
-// PDF IM BROWSER (Prototyp): Server-Seite
+// PDF IM BROWSER: Server-Seite
 // ----------------------------------------------------------------------------
 // Grosse PDFs scheiterten in Apps Script an Speicher und Laufzeit - schon beim
 // Oeffnen, noch vor der eigentlichen Pruefung. Beim PDF-Fenster im Browser
@@ -10,7 +10,8 @@
 // Script. Hier liegt nur, was der Browser nicht selbst kann: Datei pruefen und
 // das Token geben.
 //
-// Aufruf: <Web-App-URL>?page=pdfbrowser[&fileId=...]
+// Aufruf: <Web-App-URL>?page=pdfbrowser[&fileId=...][&lang=de][&start=1][&debug=1]
+// start=1 (vom Drive-Add-on gesetzt) startet die Pruefung sofort, debug=1 blendet die Diagnose ein.
 // ============================================================================
 
 // Aus doGet (Code.js): Seite fuer ?page=pdfbrowser ausliefern.
@@ -18,6 +19,8 @@ function _renderPdfBrowserPage_(e) {
   var p = (e && e.parameter) || {};
   var tpl = HtmlService.createTemplateFromFile('PdfBrowser');
   tpl.fileId = String(p.fileId || '');
+  tpl.autoStart = String(p.start || '') === '1' && !!_pdfBrowserFileId_(p.fileId);
+  tpl.debug = String(p.debug || '') === '1';
   tpl.languages = DRIVE_PDF_LANGUAGES;
   // Wie viele Pakete gleichzeitig an Gemini gehen (mehr = schneller, aber eher Limits des Proxys).
   tpl.parallel = Math.max(1, Math.min(12, parseInt(p.parallel, 10) || 6));
@@ -27,7 +30,7 @@ function _renderPdfBrowserPage_(e) {
   var known = function(code) { return DRIVE_PDF_LANGUAGES.some(function(pair) { return pair[0] === code; }); };
   tpl.lastLang = known(wanted) ? wanted : (known(last) ? last : 'de');
   return tpl.evaluate()
-    .setTitle('Kärcher TermCheck – PDF im Browser (Prototyp)')
+    .setTitle('Kärcher TermCheck – PDF check')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }

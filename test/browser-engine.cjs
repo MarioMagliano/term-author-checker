@@ -249,6 +249,8 @@ async function main() {
       .replace('<?!= JSON.stringify(languages) ?>', function() { return JSON.stringify([['de', 'German'], ['en', 'English']]); })
       .replace('<?!= JSON.stringify(lastLang) ?>', function() { return JSON.stringify('de'); })
       .replace('<?!= JSON.stringify(parallel) ?>', function() { return '6'; })
+      .replace('<?!= JSON.stringify(autoStart) ?>', function() { return 'false'; })
+      .replace('<?!= JSON.stringify(debug) ?>', function() { return 'true'; })
       .replace("<?!= include('PdfWorkerSource'); ?>", function() { return builder.build(); })
       .replace("<?!= include('PdfBrowserClient'); ?>", function() { return client; });
     const ctx2 = await browser.newContext({ acceptDownloads: true });
@@ -342,19 +344,19 @@ async function main() {
       srvLog.docReport.meta && srvLog.docReport.meta.language === 'de' && srvLog.docReport.meta.pages > 0 && ['pdf', 'text', 'mixed'].indexOf(srvLog.docReport.meta.mode) !== -1 &&
       Array.isArray(srvLog.docReport.meta.pageChecks) && (await ui.$eval('#docReportLink', function(a) { return a.href; })) === 'https://doc.test/report', JSON.stringify(srvLog.docReport));
     check('page: only real problems are shown (a prompt that failed, prompts left out because of the limit), no other hints',
-      notes.indexOf('Gem C') !== -1 && notes.indexOf('fehlgeschlagen') !== -1 && notes.indexOf('Gem A') === -1 && notes.indexOf('Gem B') === -1 &&
-      notes.indexOf('Gem D, Gem E') !== -1 && notes.indexOf('höchstens 5') !== -1 && notes.indexOf('DOC_PROMPT_MAX') !== -1 &&
-      notes.indexOf('laufen im Browser-Weg') === -1 && notes.indexOf('ausgeschaltet') === -1, notes);
+      notes.indexOf('Gem C') !== -1 && notes.indexOf('failed') !== -1 && notes.indexOf('Gem A') === -1 && notes.indexOf('Gem B') === -1 &&
+      notes.indexOf('Gem D, Gem E') !== -1 && notes.indexOf('at most 5') !== -1 && notes.indexOf('DOC_PROMPT_MAX') === -1 &&
+      notes.indexOf('switched off') === -1, notes);
     check('page: every part sent to the check as its own PDF', srvLog.parts.length > 0 && srvLog.parts.every(function(x) { return x.pdf; }) &&
       srvLog.parts.filter(function(x) { return x.to - x.from === refParts.per || x.to === refParts.n; }).length >= nParts, srvLog.parts.length + ' calls for ' + nParts + ' parts');
     check('page: parts of several pages are marked as split', srvLog.parts.every(function(x) { return x.split === true; }));
     check('page: failing part was retried and then checked page by page', srvLog.failedParts === 3 &&
       srvLog.parts.filter(function(x) { return x.to - x.from === 1 && x.from >= refParts.per && x.from < 2 * refParts.per; }).length === refParts.per, srvLog.failedParts + ' failed calls');
-    check('page: issues of all parts and of the prompts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' Funde') !== -1, issueRows + ' of ' + expectedIssues);
-    check('page: every prompt with findings is its own category, like Terminologie or Grammatik',
+    check('page: issues of all parts and of the prompts collected', issueRows === expectedIssues && chips.indexOf(expectedIssues + ' findings') !== -1, issueRows + ' of ' + expectedIssues);
+    check('page: every prompt with findings is its own category, like Terminology or Grammar',
       chips.indexOf('Gem A') !== -1 && chips.indexOf('Gem B') !== -1 && chips.indexOf('Gem C') === -1 && (await ui.$$('#chips [data-cat^="p:"]')).length === 2);
-    check('page: chips count the real types (spelling is not hidden under style)', chips.indexOf('Rechtschreibung') !== -1 && chips.indexOf('Grammatik') !== -1 && chips.indexOf('Stil') === -1, chips);
-    check('page: buttons show how many findings they use', (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Kommentierte PDF erzeugen (' + expectedIssues + ')');
+    check('page: chips count the real types (spelling is not hidden under style)', chips.indexOf('Spelling') !== -1 && chips.indexOf('Grammar') !== -1 && chips.indexOf('Style') === -1, chips);
+    check('page: buttons show how many findings they use', (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Create commented PDF (' + expectedIssues + ')');
     check('page: run is logged', srvLog.logged && srvLog.logged[0] === 'Handbuch <b>1</b>.pdf' && srvLog.logged[1] === expectedIssues && srvLog.logged[2] === nParts);
 
     await ui.click('#sheetBtn');
@@ -386,13 +388,13 @@ async function main() {
     check('page: switching a category off hides its findings and shows it as off',
       (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === expectedIssues - 2 &&
       (await ui.$eval('#chips [data-cat="p:Gem A"]', function(c) { return c.classList.contains('off') && c.getAttribute('aria-pressed') === 'false'; })) &&
-      (await ui.$eval('#chips', function(n) { return n.textContent; })).indexOf((expectedIssues - 2) + ' von ' + expectedIssues + ' Funde') !== -1);
+      (await ui.$eval('#chips', function(n) { return n.textContent; })).indexOf((expectedIssues - 2) + ' of ' + expectedIssues + ' findings') !== -1);
     await ui.click('#chips [data-cat="spelling"]');
     const filteredCount = expectedIssues - 2 - spelling;
     check('page: several categories can be off at once; the buttons show the new count',
       (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === filteredCount &&
-      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Als Sheet exportieren (' + filteredCount + ')' &&
-      (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Kommentierte PDF erzeugen (' + filteredCount + ')', 'expected ' + filteredCount);
+      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Export as Sheet (' + filteredCount + ')' &&
+      (await ui.$eval('#annBtn', function(b) { return b.textContent; })) === 'Create commented PDF (' + filteredCount + ')', 'expected ' + filteredCount);
     await ui.click('#sheetBtn');
     await ui.waitForFunction(function() { return document.getElementById('sheetLink'); }, null, { timeout: 30000 });
     check('page: the sheet export only gets the findings that are switched on', srvLog.sheetIssues === filteredCount, srvLog.sheetIssues + ' of ' + filteredCount);
@@ -408,9 +410,9 @@ async function main() {
     catch (e) { uiPy2 = String(e.message).split('\n')[0]; }
     check('page: the commented PDF only contains the findings that are switched on', uiPy2 === pageCount + ' ' + filteredCount, uiPy2);
     await ui.click('#chipAll');
-    check('page: "alle anzeigen" switches everything on again',
+    check('page: "show all" switches everything on again',
       (await ui.$$eval('#issues tr', function(r) { return r.length - 1; })) === expectedIssues && (await ui.$$('#chipAll')).length === 0 &&
-      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Als Sheet exportieren (' + expectedIssues + ')');
+      (await ui.$eval('#sheetBtn', function(b) { return b.textContent; })) === 'Export as Sheet (' + expectedIssues + ')');
 
     // Diagnostic probe on the same opened file.
     await ui.click('#diagBox summary');
@@ -418,7 +420,7 @@ async function main() {
     await ui.fill('#pageNo', '1');
     await ui.click('#probeBtn');
     await ui.waitForSelector('#probeLink', { timeout: 180000 });
-    check('page: probe comment works on the opened file', (await ui.$eval('#probeMsg', function(n) { return n.textContent; })).indexOf('1 von 1') !== -1);
+    check('page: probe comment works on the opened file', (await ui.$eval('#probeMsg', function(n) { return n.textContent; })).indexOf('1 of 1') !== -1);
     await ctx2.close();
 
     console.log('\nopen      ' + out.ms.open + ' ms, ' + out.open.requests + ' requests, downloaded ' + mb(out.open.downloadedBytes) + ' MB, retries ' + out.open.retries);
