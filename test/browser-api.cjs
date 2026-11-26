@@ -60,7 +60,7 @@ ctx.__fetch = function(url, opts) {
 
 // The files as Apps Script sees them (all share one global scope).
 ['Code.js', 'CardI18n.js', 'Authorcheck.js', 'Rules.js', 'DocPrompts.js', 'PdfInflate.js', 'PdfTextPosition.js', 'PdfAnnotate.js',
- 'PdfShrink.js', 'PdfAnnotateSearch.js', 'DriveAddon.js', 'PdfBrowserApi.js'].forEach(function(f) {
+ 'PdfShrink.js', 'PdfAnnotateSearch.js', 'DriveAddon.js', 'DrivePdfWeb.js', 'PdfBrowserApi.js'].forEach(function(f) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), ctx, { filename: f });
 });
 // Stand-ins for what needs real Apps Script: audit log, report sheet.
@@ -230,6 +230,39 @@ check('export: only known fields, limited length, unknown language -> German',
 check('export: no list -> empty report, no error', (function() { ctx.apiPdfBrowserExportSheet(null, 'x.pdf', 'de'); return sheets[1].issues.length === 0; })());
 ctx.apiPdfBrowserLogRun('Handbuch.pdf', 12, 60, ['5', '6']);
 check('protocol: run is written to the audit log', audit.length === 1 && audit[0][1] === 'DRIVE_PDF_CHECK_RUN' && /12 issue\(s\), 60 part\(s\), browser, failed pages 5,6/.test(audit[0][2]), audit[0] && audit[0][2]);
+
+// ── Page and Drive button: the add-on opens the browser check as a pop-up and starts it ──
+const FID = 'F'.repeat(33);
+let tplVars = null;
+ctx.HtmlService = {
+  XFrameOptionsMode: { ALLOWALL: 'ALLOWALL' },
+  createTemplateFromFile: function() {
+    tplVars = {};
+    const t = tplVars;
+    t.evaluate = function() { const o = { setTitle: function() { return o; }, setXFrameOptionsMode: function() { return o; }, addMetaTag: function() { return o; } }; return o; };
+    return t;
+  }
+};
+ctx._renderPdfBrowserPage_({ parameter: { fileId: FID, start: '1' } });
+check('page: start=1 with a file starts the check, debug stays off', tplVars.autoStart === true && tplVars.debug === false);
+ctx._renderPdfBrowserPage_({ parameter: { fileId: FID } });
+check('page: a link without start=1 does not start anything', tplVars.autoStart === false);
+ctx._renderPdfBrowserPage_({ parameter: { start: '1' } });
+check('page: start=1 without a file does not start', tplVars.autoStart === false);
+ctx._renderPdfBrowserPage_({ parameter: { fileId: FID, debug: '1' } });
+check('page: debug=1 shows the diagnostics', tplVars.debug === true && tplVars.autoStart === false);
+
+let opened = null;
+ctx.CardService = {
+  OpenAs: { OVERLAY: 'OVERLAY', FULL_SIZE: 'FULL_SIZE' },
+  newOpenLink: function() { const o = { setUrl: function(u) { o.url = u; return o; }, setOpenAs: function(a) { o.openAs = a; return o; } }; return o; },
+  newActionResponseBuilder: function() { const b = { setOpenLink: function(l) { opened = l; return b; }, build: function() { return { link: opened }; } }; return b; }
+};
+props.WEBAPP_URL = 'https://script.google.com/a/macros/karcher.com/s/AKfycbxyz/exec';
+ctx.apiOpenDrivePdfWindow({ parameters: { fileId: FID }, formInput: { language: 'fr' } });
+check('drive button: opens the browser check for the chosen file and language and starts it',
+  opened && opened.url === 'https://script.google.com/a/macros/karcher.com/s/AKfycbxyz/exec?page=pdfbrowser&fileId=' + FID + '&lang=fr&start=1', opened && opened.url);
+check('drive button: opens as a pop-up', opened && opened.openAs === 'OVERLAY');
 
 const ok = checks.every(Boolean);
 console.log(ok ? 'OK' : 'FAILED');

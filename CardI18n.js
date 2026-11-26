@@ -28,7 +28,7 @@ var CARD_I18N = {
     'd.language': 'Language',
     'd.checkPdf': 'Check PDF',
     'd.checkInPanel': 'Check step by step in the side panel instead',
-    'd.checkPdfSub': 'Opens the PDF window – all steps run automatically',
+    'd.checkPdfSub': 'Opens a pop-up window and starts the check',
     'd.checkInPanelSub': 'For very large files: here, one step at a time',
     'w.title': 'PDF check',
     'w.keepOpen': 'Please keep this window open – the check continues automatically.',
