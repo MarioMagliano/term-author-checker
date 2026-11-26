@@ -102,10 +102,11 @@ function _docPromptNotes_(lang, rules) {
       names: active.slice(maxPrompts).map(function(r) { return r.Description || r.Name; }).join(', ') }));
   }
   mine.forEach(function(r) {
-    if (!r.IsEnabled && _isDocScopePrompt_(r)) notes.push(_ct_('d.docNoteDisabled', { name: r.Description || r.Name }));
+    // Ein bewusst ausgeschalteter Prompt wird nicht gemeldet: wer ihn deaktiviert,
+    // weiss, dass er nicht laeuft (frueher kam hier "ist ausgeschaltet und lief nicht").
     // Lange Pruefanweisungen mit eigenem Berichtsformat gehen "pro Abschnitt"
     // (je 4 Seiten, nur Funde im Listenformat) praktisch unter.
-    else if (r.IsEnabled && !_isDocScopePrompt_(r) && String(r.CustomPrompt || '').length > 2000) {
+    if (r.IsEnabled && !_isDocScopePrompt_(r) && String(r.CustomPrompt || '').length > 2000) {
       notes.push(_ct_('d.docNotePassage', { name: r.Description || r.Name }));
     }
   });
