@@ -279,6 +279,14 @@ ctx.apiOpenDrivePdfWindow({ parameters: { fileId: FID }, formInput: { language: 
 check('drive button: opens the browser check for the chosen file and language and starts it',
   opened && opened.url === 'https://script.google.com/a/macros/karcher.com/s/AKfycbxyz/exec?page=pdfbrowser&fileId=' + FID + '&lang=fr&start=1', opened && opened.url);
 check('drive button: opens as a pop-up', opened && opened.openAs === 'OVERLAY');
+// Without WEBAPP_URL there is no step-by-step fallback any more: a clear message instead.
+delete props.WEBAPP_URL;
+let stepByStep = 0;
+ctx.apiCheckDrivePdf = function() { stepByStep++; return 'step-by-step'; };
+ctx._drivePdfErrorResponse_ = function(err) { return { error: err.message }; };
+const noUrl = ctx.apiOpenDrivePdfWindow({ parameters: { fileId: FID }, formInput: { language: 'de' } });
+check('drive button: without WEBAPP_URL a message is shown, the step-by-step check does not start',
+  stepByStep === 0 && /WEBAPP_URL/.test(noUrl.error), JSON.stringify(noUrl));
 
 const ok = checks.every(Boolean);
 console.log(ok ? 'OK' : 'FAILED');
