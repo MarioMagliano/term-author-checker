@@ -43,6 +43,7 @@ const ctx = vm.createContext({
   _phraseAuth_: function() { return 'ApiToken x'; },
   _getTargetTermbases_: function() { return [{ uid: 'tb1', name: 'TB 1', langs: ['de', 'en'] }]; },
   _tbQueryLangs_: function(tb, langs) { return langs; },
+  _drivePdfLanguageName_: function(l) { return l === 'de' ? 'German' : l; },
   _termMatchesQuery_: function(text, q) { const core = q.replace(/\*/g, '').toLowerCase(); return String(text).toLowerCase().indexOf(core) !== -1; },
   _cachePutCompressed_: function(c, k, o) { store[k] = JSON.stringify(o); },
   _cacheGetCompressed_: function(c, k) { return store[k] ? JSON.parse(store[k]) : null; },
@@ -105,6 +106,20 @@ geminiAnswer = 'fail';
 let threw = false;
 try { r = ctx._synContextForChunks_(cfg, 'de', ['Text 1', 'Text 2']); } catch (e) { threw = true; }
 check('flow: failing AI gives empty lists, no exception', !threw && r.blocks.length === 2 && r.blocks.every(function(b) { return b === ''; }));
+
+// 5. PDF part: the AI reads the attached pages, the approved terms come back as text for the prompt
+reset();
+const sent = [];
+const origFetch = ctx.UrlFetchApp.fetch;
+ctx.UrlFetchApp.fetch = function(url, opts) { if (url.indexOf('phrase.test') === -1) sent.push(JSON.parse(opts.payload)); return origFetch(url, opts); };
+ctx._fetchGeminiWithRetry_ = function(url, opts) { sent.push(JSON.parse(opts.payload)); return gemini(opts); };
+geminiAnswer = '{"terms":[{"term":"Schrubbkopf","alternatives":["Bürstenkopf"]}]}';
+const pdfBlock = ctx._synContextForPdfPart_(cfg, 'de', 'UERGREFUQQ==');
+const parts = sent[0].contents[0].parts;
+check('pdf part: the pages go to the AI as PDF, only passages in the check language', parts[1].inlineData.mimeType === 'application/pdf' && parts[1].inlineData.data === 'UERGREFUQQ==' && /ONLY passages written in German/.test(parts[0].text) && parts[0].text.indexOf('"""') === -1);
+check('pdf part: approved term for the synonym is returned for the prompt', pdfBlock.indexOf('- Bürstenkopf') !== -1 && /synonym/.test(pdfBlock), pdfBlock.slice(-120));
+geminiAnswer = 'kein json';
+check('pdf part: unusable AI answer gives an empty text', ctx._synContextForPdfPart_(cfg, 'de', 'UERGREFUQQ==') === '');
 
 const failed = checks.filter(function(c) { return !c; }).length;
 console.log('\n' + (checks.length - failed) + '/' + checks.length + ' passed');
