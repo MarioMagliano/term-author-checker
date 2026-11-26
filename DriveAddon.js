@@ -112,8 +112,9 @@ function onDriveItemsSelected(e) {
   });
   section.addWidget(langSelect);
 
-  // "PDF prüfen" öffnet das PDF-Fenster, das alle Etappen automatisch abarbeitet
-  // (DrivePdfWeb.gs). Ohne Web-App-URL: wie bisher schrittweise im Seitenbereich.
+  // "PDF prüfen" öffnet die Browser-Seite als Popup und startet dort die Prüfung
+  // (DrivePdfWeb.js). Nur ohne Web-App-URL (WEBAPP_URL) bleibt der alte schrittweise
+  // Ablauf im Seitenbereich als Notbehelf.
   var params = { fileId: item.id, fileName: item.title };
   var hasWindow = !!_drivePdfWebAppUrl_();
   card.addSection(section);
@@ -124,13 +125,6 @@ function onDriveItemsSelected(e) {
       .setFunctionName(hasWindow ? 'apiOpenDrivePdfWindow' : 'apiCheckDrivePdf')
       .setParameters(params)
       .setLoadIndicator(CardService.LoadIndicator.SPINNER));
-  if (hasWindow) {
-    _cardChoice_(choices, 'view_sidebar', _ct_('d.checkInPanel'), _ct_('d.checkInPanelSub'),
-      CardService.newAction()
-        .setFunctionName('apiCheckDrivePdf')
-        .setParameters(params)
-        .setLoadIndicator(CardService.LoadIndicator.SPINNER));
-  }
   card.addSection(choices);
   return card.build();
 }
